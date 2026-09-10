@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <title>IVOL Agent</title>
+  <link rel="stylesheet" href="sidepanel.css">
+</head>
+<body>
+  <header class="topbar">
+    <button id="btn-rooms" class="icon-btn" title="Комнаты">☰</button>
+    <div class="title-wrap">
+      <div class="room-title" id="room-title">Новый чат</div>
+      <div class="tab-title" id="tab-title"></div>
+    </div>
+    <button id="btn-new" class="icon-btn" title="Новый чат">＋</button>
+    <button id="btn-settings" class="icon-btn" title="Настройки">⚙</button>
+  </header>
+
+  <aside id="rooms-panel" class="rooms-panel hidden">
+    <div class="rooms-head">
+      <input id="rooms-search" type="text" placeholder="Поиск по комнатам" autocomplete="off">
+    </div>
+    <div id="rooms-list" class="rooms-list"></div>
+  </aside>
+
+  <main id="messages" class="messages">
+    <div class="empty-state" id="empty-state">
+      <div class="empty-logo">◈</div>
+      <div class="empty-title">Чем помочь?</div>
+      <div class="empty-hints">
+        <button class="hint" data-prompt="Что на этой странице? Кратко.">Что на этой странице?</button>
+        <button class="hint" data-prompt="Заполни форму на этой странице подходящими тестовыми данными.">Заполнить форму</button>
+        <button class="hint" data-prompt="Переведи содержимое этой страницы на русский, кратко изложи суть.">Перевести страницу</button>
+        <button class="hint" data-prompt="Найди в интернете: ">Поиск в интернете</button>
+      </div>
+    </div>
+  </main>
+
+  <div id="status" class="status hidden"></div>
+
+  <footer class="composer">
+    <div class="composer-inner">
+      <textarea id="input" rows="1" placeholder="Спроси что-нибудь или дай команду странице…"></textarea>
+      <button id="btn-send" class="send-btn" title="Отправить">↑</button>
+      <button id="btn-stop" class="send-btn stop hidden" title="Остановить">■</button>
+    </div>
+    <div class="composer-foot">
+      <select id="model-select" class="mini-select" title="Модель"></select>
+      <select id="effort-select" class="mini-select" title="Уровень рассуждений">
+        <option value="none">🧠 None</option>
+        <option value="low">🧠 Low</option>
+        <option value="medium">🧠 Medium</option>
+        <option value="high">🧠 High</option>
+        <option value="xhigh">🧠 Extra High</option>
+        <option value="max">🧠 Maximum</option>
+      </select>
+      <button id="btn-refresh-models" class="mini-btn" title="Обновить список моделей">⟳</button>
+      <span id="version-badge" class="version-badge"></span>
+    </div>
+  </footer>
+
+  <script type="module" src="sidepanel.js"></script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+node_modules/
+.DS_Store
+*.log
+*.zip
+.env
+.env.*
+secrets.json
+
+# Локальная конфигурация с API-ключом. Шаблон — config.example.js
+config.js
+
+# Рабочие заметки, не для публикации
+CURRENT_WORK.md
