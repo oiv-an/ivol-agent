@@ -17,6 +17,8 @@ const els = {
   roomsPanel: $("rooms-panel"),
   roomsList: $("rooms-list"),
   roomsSearch: $("rooms-search"),
+  roomsDomain: $("rooms-domain"),
+  roomsDomainCurrent: $("rooms-domain-current"),
   btnRooms: $("btn-rooms"),
   btnNew: $("btn-new"),
   btnSettings: $("btn-settings"),
@@ -48,6 +50,7 @@ let state = {
   tab: null, // текущая вкладка: { id, url, title, host, restricted }
   watchdog: null,
   windowId: null, // окно, в котором живёт ЭТА панель
+  roomsFilter: "", // выбранный домен в истории чатов ("" = все сайты)
 };
 
 // ---------- хранилище ----------
@@ -798,42 +801,130 @@ function approvalBody(name, args) {
 
 // ---------- список комнат ----------
 
+// домен, по которому чат сгруппирован в истории
+function roomDomain(r) {
+  return r.tabDomain || normDomain(r.tabHost) || "";
+}
+
+// Заполняем выпадающий фильтр: домен + число чатов. Текущий сайт — сразу под «все».
+function fillDomainSelect(rooms) {
+  const counts = new Map();
+  for (const r of rooms) {
+    const d = roomDomain(r) || "(без сайта)";
+    counts.set(d, (counts.get(d) || 0) + 1);
+  }
+
+  const cur = tabDomain(state.tab);
+  const domains = [...counts.keys()].sort((a, b) => {
+    if (a === cur) return -1;
+    if (b === cur) return 1;
+    // больше чатов — выше, при равенстве по алфавиту
+    const d = counts.get(b) - counts.get(a);
+    return d || a.localeCompare(b);
+  });
+
+  const prev = state.roomsFilter || "";
+  els.roomsDomain.innerHTML = "";
+
+  const all = document.createElement("option");
+  all.value = "";
+  all.textContent = `Все сайты (${rooms.length})`;
+  els.roomsDomain.appendChild(all);
+
+  for (const d of domains) {
+    const o = document.createElement("option");
+    o.value = d;
+    o.textContent = `${d} (${counts.get(d)})`;
+    els.roomsDomain.appendChild(o);
+  }
+
+  // выбранный домен мог исчезнуть после удаления последнего чата
+  if (prev && !counts.has(prev)) state.roomsFilter = "";
+  els.roomsDomain.value = state.roomsFilter || "";
+  els.roomsDomainCurrent.classList.toggle(
+    "active",
+    !!cur && state.roomsFilter === cur,
+  );
+}
+
 function renderRoomsList() {
   const q = els.roomsSearch.value.trim().toLowerCase();
-  const list = state.rooms
-    .slice()
-    .sort((a, b) => b.updatedAt - a.updatedAt)
-    .filter((r) => !q || r.title.toLowerCase().includes(q));
+  const cur = tabDomain(state.tab);
+
+  fillDomainSelect(state.rooms);
+
+  const list = state.rooms.filter((r) => {
+    if (q && !r.title.toLowerCase().includes(q)) return false;
+    if (!state.roomsFilter) return true;
+    return (roomDomain(r) || "(без сайта)") === state.roomsFilter;
+  });
+
+  // группируем по домену
+  const groups = new Map();
+  for (const r of list) {
+    const d = roomDomain(r) || "(без сайта)";
+    if (!groups.has(d)) groups.set(d, []);
+    groups.get(d).push(r);
+  }
+  for (const arr of groups.values())
+    arr.sort((a, b) => b.updatedAt - a.updatedAt);
+
+  // порядок групп: текущий сайт → по свежести последнего чата
+  const order = [...groups.keys()].sort((a, b) => {
+    if (a === cur) return -1;
+    if (b === cur) return 1;
+    return groups.get(b)[0].updatedAt - groups.get(a)[0].updatedAt;
+  });
 
   els.roomsList.innerHTML = "";
-  for (const r of list) {
-    const item = document.createElement("div");
-    item.className =
-      "room-item" + (r.id === state.currentRoomId ? " active" : "");
-    item.innerHTML =
-      `<span class="room-item-title">${escapeHtml(r.title)}` +
-      (r.tabHost
-        ? `<span class="room-item-host">${escapeHtml(r.tabHost)}</span>`
-        : "") +
-      `</span>` +
-      `<button class="room-item-del" title="Удалить">✕</button>`;
-    item.querySelector(".room-item-title").addEventListener("click", () => {
-      state.currentRoomId = r.id;
-      persist();
-      renderRoom();
-      toggleRooms(false);
-    });
-    item.querySelector(".room-item-del").addEventListener("click", (e) => {
-      e.stopPropagation();
-      state.rooms = state.rooms.filter((x) => x.id !== r.id);
-      if (!state.rooms.length) createRoom(false);
-      if (state.currentRoomId === r.id) state.currentRoomId = state.rooms[0].id;
-      persist();
-      renderRoomsList();
-      renderRoom();
-    });
-    els.roomsList.appendChild(item);
+
+  if (!order.length) {
+    const empty = document.createElement("div");
+    empty.className = "rooms-empty";
+    empty.textContent = "Ничего не найдено";
+    els.roomsList.appendChild(empty);
+    return;
   }
+
+  for (const dom of order) {
+    const head = document.createElement("div");
+    head.className = "rooms-group" + (dom === cur ? " current" : "");
+    head.innerHTML =
+      `<span>${escapeHtml(dom)}</span>` +
+      `<span class="count">${groups.get(dom).length}</span>`;
+    els.roomsList.appendChild(head);
+
+    for (const r of groups.get(dom)) els.roomsList.appendChild(roomItem(r));
+  }
+}
+
+function roomItem(r) {
+  const item = document.createElement("div");
+  item.className =
+    "room-item" + (r.id === state.currentRoomId ? " active" : "");
+  item.innerHTML =
+    `<span class="room-item-title">${escapeHtml(r.title)}` +
+    (r.tabHost
+      ? `<span class="room-item-host">${escapeHtml(r.tabHost)}</span>`
+      : "") +
+    `</span>` +
+    `<button class="room-item-del" title="Удалить">✕</button>`;
+  item.querySelector(".room-item-title").addEventListener("click", () => {
+    state.currentRoomId = r.id;
+    persist();
+    renderRoom();
+    toggleRooms(false);
+  });
+  item.querySelector(".room-item-del").addEventListener("click", (e) => {
+    e.stopPropagation();
+    state.rooms = state.rooms.filter((x) => x.id !== r.id);
+    if (!state.rooms.length) createRoom(false);
+    if (state.currentRoomId === r.id) state.currentRoomId = state.rooms[0].id;
+    persist();
+    renderRoomsList();
+    renderRoom();
+  });
+  return item;
 }
 
 // ---------- системный промпт для сайта ----------
@@ -957,6 +1048,17 @@ els.btnSettings.addEventListener("click", () =>
   chrome.runtime.openOptionsPage(),
 );
 els.roomsSearch.addEventListener("input", renderRoomsList);
+els.roomsDomain.addEventListener("change", () => {
+  state.roomsFilter = els.roomsDomain.value;
+  renderRoomsList();
+});
+// быстрый переход к чатам текущего сайта, повторный клик снимает фильтр
+els.roomsDomainCurrent.addEventListener("click", () => {
+  const cur = tabDomain(state.tab);
+  if (!cur) return;
+  state.roomsFilter = state.roomsFilter === cur ? "" : cur;
+  renderRoomsList();
+});
 
 document.querySelectorAll(".hint").forEach((b) => {
   b.addEventListener("click", () => {
