@@ -48,6 +48,36 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  // ---- разрешения по домену ----
+  if (msg.action === "get_permissions") {
+    getPermissions()
+      .then((perms) => sendResponse({ ok: true, perms }))
+      .catch(() => sendResponse({ ok: false, perms: {} }));
+    return true;
+  }
+
+  if (msg.action === "reset_permissions") {
+    resetDomainPermissions(msg.domain)
+      .then(() => sendResponse({ ok: true }))
+      .catch((e) => sendResponse({ ok: false, error: String(e.message || e) }));
+    return true;
+  }
+
+  // ---- системный промпт для домена ----
+  if (msg.action === "get_site_prompt") {
+    getSitePrompt(msg.domain)
+      .then((prompt) => sendResponse({ ok: true, prompt }))
+      .catch(() => sendResponse({ ok: true, prompt: "" }));
+    return true;
+  }
+
+  if (msg.action === "save_site_prompt") {
+    saveSitePrompt(msg.domain, msg.prompt)
+      .then(() => sendResponse({ ok: true }))
+      .catch((e) => sendResponse({ ok: false, error: String(e.message || e) }));
+    return true;
+  }
+
   if (msg.action === "run_agent") {
     // отвечаем сразу, работа идёт в фоне
     sendResponse({ ok: true });
@@ -79,6 +109,7 @@ function tabInfo(tab) {
     url: tab.url,
     title: tab.title,
     host: safeHost(tab.url),
+    domain: normDomain(safeHost(tab.url)), // ключ разрешений и промпта сайта
     restricted: isRestricted(tab.url),
   };
 }
@@ -139,10 +170,56 @@ async function getSettings() {
   return s;
 }
 
+// ---------- разрешения по домену (глобальные, не привязаны к чату) ----------
+
+async function getPermissions() {
+  const { permissions } = await chrome.storage.local.get(["permissions"]);
+  return permissions && typeof permissions === "object" ? permissions : {};
+}
+
+async function savePermission(key) {
+  const perms = await getPermissions();
+  perms[key] = true;
+  await chrome.storage.local.set({ permissions: perms });
+}
+
+async function resetDomainPermissions(domain) {
+  const perms = await getPermissions();
+  const suffix = ":" + normDomain(domain);
+  for (const k of Object.keys(perms)) {
+    if (!domain || k.endsWith(suffix)) delete perms[k];
+  }
+  await chrome.storage.local.set({ permissions: perms });
+}
+
+// ---------- системный промпт для домена ----------
+
+async function getSitePrompts() {
+  const { sitePrompts } = await chrome.storage.local.get(["sitePrompts"]);
+  return sitePrompts && typeof sitePrompts === "object" ? sitePrompts : {};
+}
+
+async function getSitePrompt(domain) {
+  const d = normDomain(domain);
+  if (!d) return "";
+  const all = await getSitePrompts();
+  return all[d] || "";
+}
+
+async function saveSitePrompt(domain, prompt) {
+  const d = normDomain(domain);
+  if (!d) return;
+  const all = await getSitePrompts();
+  const text = String(prompt || "").trim();
+  if (text) all[d] = text;
+  else delete all[d];
+  await chrome.storage.local.set({ sitePrompts: all });
+}
+
 // ---------- системный промпт ----------
 
-function systemPrompt(pageInfo) {
-  return [
+function systemPrompt(pageInfo, extra = {}) {
+  const base = [
     "Ты — IVOL Agent, ассистент, встроенный в браузер Chrome в виде боковой панели.",
     "Ты можешь читать текущую страницу, заполнять формы, кликать, скроллить, открывать сайты, искать в интернете и выполнять JavaScript.",
     "",
@@ -172,6 +249,24 @@ function systemPrompt(pageInfo) {
           : "")
       : "",
   ].join("\n");
+
+  const parts = [base];
+
+  const global = String(extra.globalPrompt || "").trim();
+  if (global) {
+    parts.push(
+      "",
+      "ГЛОБАЛЬНЫЕ ИНСТРУКЦИИ ПОЛЬЗОВАТЕЛЯ (приоритет выше правил стиля выше):",
+      global,
+    );
+  }
+
+  const site = String(extra.sitePrompt || "").trim();
+  if (site) {
+    parts.push("", `ИНСТРУКЦИИ ДЛЯ САЙТА ${extra.domain || ""}:`.trim(), site);
+  }
+
+  return parts.join("\n");
 }
 
 // ---------- главный цикл ----------
@@ -180,7 +275,6 @@ async function runAgent({
   runId,
   roomId,
   input,
-  allowedActions,
   tabId,
   windowId,
 }) {
@@ -200,14 +294,21 @@ async function runAgent({
   const controller = new AbortController();
   running.set(runId, controller);
 
-  const roomPerms = allowedActions || {};
+  // Домен вкладки — ключ и для разрешений, и для системного промпта сайта
+  const domain = normDomain(tab && tab.url ? safeHost(tab.url) : "");
+  const sitePrompt = await getSitePrompt(domain);
+  const instructions = systemPrompt(tab, {
+    globalPrompt: settings.systemPrompt,
+    sitePrompt,
+    domain,
+  });
 
   try {
     for (let step = 0; step < MAX_LOOP_STEPS; step++) {
       const result = await streamOnce({
         settings,
         runId,
-        instructions: systemPrompt(tab),
+        instructions,
         input: conversation,
         signal: controller.signal,
       });
@@ -230,8 +331,15 @@ async function runAgent({
         }
 
         const risk = TOOL_RISK[call.name] || RISK.ASK;
-        const domain = tab && tab.url ? safeHost(tab.url) : "";
-        const permKey = `${call.name}:${domain}`;
+        // Домен берём заново: агент мог уйти на другой сайт через open_url
+        const curTab = await resolveTab(
+          tab && tab.id,
+          tab && tab.windowId,
+        ).catch(() => tab);
+        const curDomain = normDomain(
+          curTab && curTab.url ? safeHost(curTab.url) : domain,
+        );
+        const permKey = `${call.name}:${curDomain}`;
 
         let allowed = true;
         if (risk === RISK.ASK_ALWAYS) {
@@ -240,18 +348,19 @@ async function runAgent({
             call,
             args,
             risk,
-            domain,
+            domain: curDomain,
             canRemember: false,
           });
         } else if (risk === RISK.ASK) {
-          if (roomPerms[permKey]) {
+          const perms = await getPermissions();
+          if (perms[permKey]) {
             allowed = true;
             emit({
               type: "tool_auto",
               runId,
               name: call.name,
               args,
-              reason: "разрешено ранее для " + domain,
+              reason: "разрешено для " + curDomain,
             });
           } else {
             const res = await requestApprovalFull({
@@ -259,12 +368,12 @@ async function runAgent({
               call,
               args,
               risk,
-              domain,
+              domain: curDomain,
               canRemember: true,
             });
             allowed = res.allowed;
             if (allowed && res.remember) {
-              roomPerms[permKey] = true;
+              await savePermission(permKey);
               emit({ type: "permission_saved", runId, roomId, key: permKey });
             }
           }
@@ -776,6 +885,28 @@ function safeHost(url) {
   } catch (_) {
     return "";
   }
+}
+
+// Ключ разрешений и промптов сайта: домен без www, порта и регистра.
+// Поддомены схлопываем до регистрируемого домена (mail.google.com -> google.com),
+// иначе разрешение, выданное в одной комнате сайта, не сработает в другой.
+const MULTI_TLD =
+  /\.(co|com|net|org|gov|edu|ac|or|ne|go)\.[a-z]{2}$|\.(com|net|org)\.(ua|ru|br|au|tr|mx|ar|pl|cn|in|za|sg|my|id|ph|vn|nz|hk|tw|kr|il|gr|pe|co|ve|ec|uy)$/i;
+
+function normDomain(host) {
+  let h = String(host || "")
+    .toLowerCase()
+    .trim();
+  if (!h) return "";
+  h = h.replace(/^https?:\/\//, "").split("/")[0];
+  h = h.split(":")[0]; // порт
+  if (!h) return "";
+  // IP-адрес и localhost оставляем как есть
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(h) || !h.includes(".")) return h;
+
+  const parts = h.split(".");
+  const keep = MULTI_TLD.test(h) ? 3 : 2;
+  return parts.slice(-keep).join(".");
 }
 
 function trimSlash(s) {

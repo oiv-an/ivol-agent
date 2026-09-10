@@ -7,6 +7,7 @@ const DEFAULTS = {
   model: "",
   effort: "max",
   webSearch: true,
+  systemPrompt: "",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -16,6 +17,7 @@ const el = {
   model: $("model"),
   effort: $("effort"),
   webSearch: $("webSearch"),
+  systemPrompt: $("systemPrompt"),
   save: $("save"),
   test: $("test"),
   reload: $("reload"),
@@ -65,6 +67,7 @@ async function load() {
   el.apiKey.value = s.apiKey;
   el.effort.value = s.effort;
   el.webSearch.checked = s.webSearch !== false;
+  el.systemPrompt.value = s.systemPrompt || "";
   fillModelSelect([s.model], s.model);
   if (s.apiKey) loadModels(true);
 }
@@ -98,6 +101,7 @@ async function save() {
     model: el.model.value || DEFAULTS.model,
     effort: el.effort.value,
     webSearch: el.webSearch.checked,
+    systemPrompt: el.systemPrompt.value.trim(),
   };
   await chrome.storage.local.set({ settings });
   setStatus("Сохранено", "ok");

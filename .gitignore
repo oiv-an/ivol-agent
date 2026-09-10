@@ -11,3 +11,7 @@ config.js
 
 # Рабочие заметки, не для публикации
 CURRENT_WORK.md
+CURRENT_TASK.md
+
+# Local History (VS Code)
+.lh/

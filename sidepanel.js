@@ -20,6 +20,15 @@ const els = {
   btnRooms: $("btn-rooms"),
   btnNew: $("btn-new"),
   btnSettings: $("btn-settings"),
+  btnSitePrompt: $("btn-site-prompt"),
+  sitePanel: $("site-panel"),
+  sitePanelDomain: $("site-panel-domain"),
+  sitePromptInput: $("site-prompt"),
+  sitePromptSave: $("site-prompt-save"),
+  sitePromptClear: $("site-prompt-clear"),
+  sitePermsReset: $("site-perms-reset"),
+  sitePanelStatus: $("site-panel-status"),
+  sitePanelClose: $("site-panel-close"),
   modelSelect: $("model-select"),
   effortSelect: $("effort-select"),
   btnRefreshModels: $("btn-refresh-models"),
@@ -62,10 +71,7 @@ async function loadState() {
 // Панелей может быть несколько (по одной на окно) — пишем со слиянием,
 // иначе соседнее окно затрёт наши комнаты целиком.
 async function persist() {
-  const data = await chrome.storage.local.get([
-    "rooms",
-    "currentRoomByWindow",
-  ]);
+  const data = await chrome.storage.local.get(["rooms", "currentRoomByWindow"]);
   const stored = data.rooms || [];
 
   const merged = [];
@@ -97,10 +103,10 @@ function createRoom(render = true, tab = state.tab) {
     updatedAt: Date.now(),
     items: [], // сырые items для Responses API
     view: [], // элементы для отрисовки
-    allowedActions: {},
-    // привязка к вкладке
+    // привязка к вкладке и к домену, с которого начался диалог
     tabId: tab ? tab.id : null,
     tabHost: tab ? tab.host || "" : "",
+    tabDomain: tab ? tab.domain || normDomain(tab.host) : "",
     tabTitle: tab ? tab.title || "" : "",
     windowId: tab ? tab.windowId : state.windowId,
   };
@@ -115,22 +121,50 @@ function createRoom(render = true, tab = state.tab) {
 
 // ---------- привязка комнат к вкладкам ----------
 
+// Тот же алгоритм, что в background.normDomain: ключ для промптов и разрешений
+const MULTI_TLD =
+  /\.(co|com|net|org|gov|edu|ac|or|ne|go)\.[a-z]{2}$|\.(com|net|org)\.(ua|ru|br|au|tr|mx|ar|pl|cn|in|za|sg|my|id|ph|vn|nz|hk|tw|kr|il|gr|pe|co|ve|ec|uy)$/i;
+
+function normDomain(host) {
+  let h = String(host || "")
+    .toLowerCase()
+    .trim();
+  if (!h) return "";
+  h = h
+    .replace(/^https?:\/\//, "")
+    .split("/")[0]
+    .split(":")[0];
+  if (!h) return "";
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(h) || !h.includes(".")) return h;
+  const parts = h.split(".");
+  return parts.slice(MULTI_TLD.test(h) ? -3 : -2).join(".");
+}
+
+function tabDomain(tab) {
+  if (!tab) return "";
+  return tab.domain || normDomain(tab.host);
+}
+
 function roomForTab(tab) {
   if (!tab) return null;
   // точное совпадение по id вкладки — самое надёжное
   let room = state.rooms.find((r) => r.tabId === tab.id);
   if (room) return room;
 
-  // Вкладку могли перезапустить (id меняется) — ищем по домену.
-  // Но только среди комнат ЭТОГО окна, иначе панели разных окон
-  // будут воровать друг у друга чаты одного и того же сайта.
-  if (tab.host) {
-    room = state.rooms.find(
-      (r) =>
-        r.tabHost === tab.host &&
-        (r.windowId == null || r.windowId === tab.windowId) &&
-        !state.rooms.some((o) => o !== r && o.tabId === r.tabId),
-    );
+  // Вкладку могли перезапустить (id меняется) — ищем по домену,
+  // с которым чат был связан изначально. Берём самый свежий чат домена
+  // в ЭТОМ окне, иначе панели разных окон воруют чаты друг у друга.
+  const dom = tabDomain(tab);
+  if (dom) {
+    const candidates = state.rooms
+      .filter(
+        (r) =>
+          (r.tabDomain || normDomain(r.tabHost)) === dom &&
+          (r.windowId == null || r.windowId === tab.windowId) &&
+          !state.rooms.some((o) => o !== r && o.tabId === r.tabId),
+      )
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+    room = candidates[0];
     if (room) {
       room.tabId = tab.id;
       room.windowId = tab.windowId;
@@ -143,6 +177,7 @@ function roomForTab(tab) {
 function applyTab(tab, { switchRoom = true } = {}) {
   state.tab = tab;
   renderTabTitle();
+  loadSitePrompt();
   if (!switchRoom || !tab) return;
 
   const room = roomForTab(tab);
@@ -151,9 +186,10 @@ function applyTab(tab, { switchRoom = true } = {}) {
       state.currentRoomId = room.id;
       renderRoom();
     }
-    // обновляем метаданные вкладки в комнате
+    // обновляем метаданные вкладки в комнате, но домен старта не трогаем
     room.tabId = tab.id;
     room.tabHost = tab.host || room.tabHost;
+    if (!room.tabDomain) room.tabDomain = tabDomain(tab);
     room.tabTitle = tab.title || room.tabTitle;
     room.windowId = tab.windowId;
   } else {
@@ -162,6 +198,7 @@ function applyTab(tab, { switchRoom = true } = {}) {
     if (cur && !cur.items.length) {
       cur.tabId = tab.id;
       cur.tabHost = tab.host || "";
+      cur.tabDomain = tabDomain(tab);
       cur.tabTitle = tab.title || "";
       cur.windowId = tab.windowId;
       renderRoom();
@@ -359,7 +396,6 @@ function retryLast(chipEl) {
         runId: state.runId,
         roomId: room.id,
         input: room.items,
-        allowedActions: room.allowedActions,
         tabId: room.tabId ?? (state.tab ? state.tab.id : null),
         windowId: state.windowId,
       },
@@ -440,7 +476,6 @@ async function send(textOverride) {
         runId: state.runId,
         roomId: room.id,
         input: room.items,
-        allowedActions: room.allowedActions,
         tabId: room.tabId ?? (state.tab ? state.tab.id : null),
         windowId: state.windowId,
       },
@@ -595,10 +630,8 @@ function handleEvent(evt) {
       break;
 
     case "permission_saved":
-      if (room) {
-        room.allowedActions[evt.key] = true;
-        persist();
-      }
+      // разрешения теперь глобальные и хранятся в background
+      addChip("разрешение сохранено для " + (evt.key || "").split(":")[1]);
       break;
 
     case "done":
@@ -803,11 +836,87 @@ function renderRoomsList() {
   }
 }
 
+// ---------- системный промпт для сайта ----------
+
+function siteStatus(text) {
+  els.sitePanelStatus.textContent = text || "";
+  if (text) setTimeout(() => (els.sitePanelStatus.textContent = ""), 2000);
+}
+
+async function loadSitePrompt() {
+  const dom = tabDomain(state.tab);
+  els.sitePanelDomain.textContent = dom || "—";
+  if (!dom) {
+    els.sitePromptInput.value = "";
+    els.btnSitePrompt.classList.remove("active");
+    return;
+  }
+  try {
+    const resp = await chrome.runtime.sendMessage({
+      target: "background",
+      action: "get_site_prompt",
+      domain: dom,
+    });
+    const text = (resp && resp.prompt) || "";
+    els.sitePromptInput.value = text;
+    // подсвечиваем кнопку, если для домена уже что-то задано
+    els.btnSitePrompt.classList.toggle("active", !!text.trim());
+  } catch (_) {}
+}
+
+function toggleSitePanel(force) {
+  const show =
+    force !== undefined ? force : els.sitePanel.classList.contains("hidden");
+  els.sitePanel.classList.toggle("hidden", !show);
+  if (show) {
+    toggleRooms(false);
+    loadSitePrompt();
+    els.sitePromptInput.focus();
+  }
+}
+
+async function saveSitePrompt(text) {
+  const dom = tabDomain(state.tab);
+  if (!dom) {
+    siteStatus("нет домена");
+    return;
+  }
+  await chrome.runtime.sendMessage({
+    target: "background",
+    action: "save_site_prompt",
+    domain: dom,
+    prompt: text,
+  });
+  els.btnSitePrompt.classList.toggle("active", !!String(text).trim());
+  siteStatus("сохранено");
+}
+
+els.btnSitePrompt.addEventListener("click", () => toggleSitePanel());
+els.sitePanelClose.addEventListener("click", () => toggleSitePanel(false));
+els.sitePromptSave.addEventListener("click", () =>
+  saveSitePrompt(els.sitePromptInput.value),
+);
+els.sitePromptClear.addEventListener("click", () => {
+  els.sitePromptInput.value = "";
+  saveSitePrompt("");
+});
+els.sitePermsReset.addEventListener("click", async () => {
+  const dom = tabDomain(state.tab);
+  if (!dom) return;
+  await chrome.runtime.sendMessage({
+    target: "background",
+    action: "reset_permissions",
+    domain: dom,
+  });
+  siteStatus("разрешения сброшены");
+});
+
 function toggleRooms(force) {
   const show =
     force !== undefined ? force : els.roomsPanel.classList.contains("hidden");
   els.roomsPanel.classList.toggle("hidden", !show);
   if (show) {
+    els.sitePanel.classList.add("hidden");
     renderRoomsList();
     els.roomsSearch.focus();
   }
@@ -836,9 +945,12 @@ els.stop.addEventListener("click", () => {
     runId: state.runId,
   });
 });
+// Новая задача: чистый контекст, старый чат остаётся в истории этого домена
 els.btnNew.addEventListener("click", () => {
-  createRoom();
+  createRoom(true, state.tab);
   toggleRooms(false);
+  toggleSitePanel(false);
+  renderRoomsList();
 });
 els.btnRooms.addEventListener("click", () => toggleRooms());
 els.btnSettings.addEventListener("click", () =>

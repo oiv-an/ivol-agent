@@ -7,12 +7,13 @@
 </head>
 <body>
   <header class="topbar">
-    <button id="btn-rooms" class="icon-btn" title="Комнаты">☰</button>
+    <button id="btn-rooms" class="icon-btn" title="История чатов">☰</button>
     <div class="title-wrap">
       <div class="room-title" id="room-title">Новый чат</div>
       <div class="tab-title" id="tab-title"></div>
     </div>
-    <button id="btn-new" class="icon-btn" title="Новый чат">＋</button>
+    <button id="btn-site-prompt" class="icon-btn" title="Системный промпт для этого сайта">📝</button>
+    <button id="btn-new" class="icon-btn" title="Новая задача — очистить контекст">＋</button>
     <button id="btn-settings" class="icon-btn" title="Настройки">⚙</button>
   </header>
 
@@ -21,6 +22,22 @@
       <input id="rooms-search" type="text" placeholder="Поиск по комнатам" autocomplete="off">
     </div>
     <div id="rooms-list" class="rooms-list"></div>
+  </aside>
+
+  <aside id="site-panel" class="site-panel hidden">
+    <div class="site-panel-head">
+      <span>Промпт для <b id="site-panel-domain">—</b></span>
+      <button id="site-panel-close" class="icon-btn" title="Закрыть">✕</button>
+    </div>
+    <textarea id="site-prompt" rows="6" spellcheck="false"
+      placeholder="Инструкции, которые всегда отправляются на этом домене. Например: это админка Symfony, отвечай командами и не трогай прод."></textarea>
+    <div class="site-panel-actions">
+      <button id="site-prompt-save" class="btn primary">Сохранить</button>
+      <button id="site-prompt-clear" class="btn ghost">Очистить</button>
+      <button id="site-perms-reset" class="btn ghost" title="Снова спрашивать подтверждения на этом домене">Сбросить разрешения</button>
+      <span id="site-panel-status" class="site-panel-status"></span>
+    </div>
+    <div class="site-panel-hint">Промпт привязан к домену и действует во всех чатах этого сайта. Глобальный промпт — в настройках ⚙.</div>
   </aside>
 
   <main id="messages" class="messages">

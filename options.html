@@ -16,12 +16,14 @@
     h1 { font-size: 20px; margin: 0 0 4px; }
     .sub { color: var(--dim); font-size: 13px; margin-bottom: 26px; }
     label { display: block; margin-bottom: 6px; font-size: 13px; color: var(--dim); }
-    input[type=text], input[type=password], select {
+    input[type=text], input[type=password], select, textarea {
       width: 100%; padding: 9px 11px; background: var(--elev);
       border: 1px solid var(--border); border-radius: 8px; color: var(--text);
       font: inherit; outline: none; margin-bottom: 18px;
+      box-sizing: border-box;
     }
-    input:focus, select:focus { border-color: #575757; }
+    textarea { min-height: 160px; resize: vertical; line-height: 1.45; }
+    input:focus, select:focus, textarea:focus { border-color: #575757; }
     .row { display: flex; gap: 12px; align-items: center; margin-bottom: 18px; }
     .row input[type=checkbox] { width: 16px; height: 16px; }
     .row label { margin: 0; color: var(--text); }
@@ -68,6 +70,10 @@
       <input type="checkbox" id="webSearch" checked>
       <label for="webSearch">Нативный поиск в интернете</label>
     </div>
+
+    <label for="systemPrompt">Глобальный системный промпт</label>
+    <textarea id="systemPrompt" spellcheck="false" placeholder="Например: отвечай кратко, всегда показывай итоговый код целиком, не задавай уточняющих вопросов…"></textarea>
+    <div class="hint">Добавляется к базовому промпту на всех сайтах. Промпт для конкретного сайта настраивается в самой панели (кнопка 📝).</div>
 
     <div class="actions">
       <button id="save">Сохранить</button>
