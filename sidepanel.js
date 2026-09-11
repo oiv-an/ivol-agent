@@ -363,7 +363,8 @@ function addUserMessage(text, save = true) {
   retry.type = "button";
   retry.title = "Отправить этот запрос ещё раз";
   retry.textContent = "⟳";
-  retry.addEventListener("click", () => retryLast());
+  // повтор именно ЭТОГО сообщения, а не «последнего вообще»
+  retry.addEventListener("click", () => retryMessage(text));
   wrap.appendChild(retry);
 
   els.messages.appendChild(wrap);
@@ -485,14 +486,51 @@ function addChip(text, variant = "", withRetry = false) {
   return chip;
 }
 
-// Повтор последнего запроса: откатываем историю до последнего сообщения
-// пользователя и отправляем заново.
+// Текст user-item'а в формате Responses API (для сравнения с пузырём в чате)
+function itemText(item) {
+  if (!item || item.role !== "user") return null;
+  if (typeof item.content === "string") return item.content;
+  if (!Array.isArray(item.content)) return null;
+  const parts = item.content
+    .filter((c) => c && c.type === "input_text" && c.text)
+    .map((c) => c.text);
+  return parts.length ? parts.join("\n") : null;
+}
+
+// Повтор конкретного сообщения пользователя (кнопка ⟳ у пузыря).
+// Ищем ПОСЛЕДНЕЕ вхождение этого текста в items — иначе при повторяющихся
+// запросах откатились бы к самому первому.
+function retryMessage(text, chipEl) {
+  if (state.running) return;
+  const room = getRoom();
+  if (!room) return;
+
+  let idx = -1;
+  for (let i = room.items.length - 1; i >= 0; i--) {
+    if (itemText(room.items[i]) === text) {
+      idx = i;
+      break;
+    }
+  }
+
+  // Сообщения нет в контексте: после сжатия старые items не сохраняются.
+  // Не откатываем историю, а просто отправляем этот текст заново в конец.
+  if (idx === -1) {
+    if (chipEl) chipEl.remove();
+    addChip("это сообщение вне текущего контекста — отправляю заново");
+    send(text);
+    return;
+  }
+
+  runFrom(room, idx, chipEl);
+}
+
+// Повтор из плашки ошибки/остановки: откат до последнего user-сообщения
 function retryLast(chipEl) {
   if (state.running) return;
   const room = getRoom();
   if (!room) return;
 
-  // ищем последний user-item
   let lastUserIdx = -1;
   for (let i = room.items.length - 1; i >= 0; i--) {
     if (room.items[i].role === "user") {
@@ -504,21 +542,24 @@ function retryLast(chipEl) {
     addChip("нечего повторять — нет сообщений", "err");
     return;
   }
+  runFrom(room, lastUserIdx, chipEl);
+}
 
-  // отрезаем всё, что модель успела наговорить после последнего вопроса
-  room.items = room.items.slice(0, lastUserIdx + 1);
+// Отрезаем всё после user-item с индексом idx и отправляем контекст заново
+function runFrom(room, idx, chipEl) {
+  const text = itemText(room.items[idx]);
+  room.items = room.items.slice(0, idx + 1);
 
-  // чистим отрисовку от плашки ошибки и хвоста после последнего user-сообщения
-  let lastUserViewIdx = -1;
+  // отрисовку режем по тому же сообщению: ищем его пузырь с конца
+  let viewIdx = -1;
   for (let i = room.view.length - 1; i >= 0; i--) {
-    if (room.view[i].role === "user") {
-      lastUserViewIdx = i;
+    const v = room.view[i];
+    if (v.role === "user" && (text == null || v.text === text)) {
+      viewIdx = i;
       break;
     }
   }
-  if (lastUserViewIdx !== -1) {
-    room.view = room.view.slice(0, lastUserViewIdx + 1);
-  }
+  if (viewIdx !== -1) room.view = room.view.slice(0, viewIdx + 1);
 
   if (chipEl) chipEl.remove();
   renderRoom();
