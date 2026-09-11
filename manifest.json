@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "IVOL Agent",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "description": "ChatGPT-агент в боковой панели: читает страницу, видит её глазами, заполняет формы, кликает, ищет в вебе и выполняет скрипты — с подтверждением каждого действия.",
   "permissions": ["storage", "sidePanel", "tabs", "scripting", "activeTab"],
   "host_permissions": ["<all_urls>"],

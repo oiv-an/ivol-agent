@@ -402,7 +402,6 @@ async function runAgent({ runId, roomId, input, tabId, windowId }) {
 
   const tab = await resolveTab(tabId, windowId);
   let conversation = [...input];
-  const baseLen = conversation.length;
   const controller = new AbortController();
   running.set(runId, controller);
 
@@ -429,11 +428,27 @@ async function runAgent({ runId, roomId, input, tabId, windowId }) {
   let compressions = 0;
   let step = 0;
 
+  // Сколько items панель уже сохранила у себя. Всё наработанное отдаём
+  // порциями по ходу дела: если run оборвётся (ошибка, таймаут, выгрузка
+  // воркера) — сделанное не пропадёт и можно будет продолжить с этого места.
+  let synced = conversation.length;
+  const flush = () => {
+    if (conversation.length <= synced) return;
+    emit({
+      type: "progress",
+      runId,
+      roomId,
+      items: conversation.slice(synced),
+    });
+    synced = conversation.length;
+  };
+
   try {
     while (true) {
       // Лимит шагов исчерпан — вместо остановки сжимаем контекст и работаем дальше
       if (step >= maxSteps) {
         if (compressions >= maxCompressions) {
+          flush();
           emit({
             type: "error",
             runId,
@@ -442,6 +457,8 @@ async function runAgent({ runId, roomId, input, tabId, windowId }) {
           return;
         }
         compressions++;
+        // всё наработанное уже у панели: следом придёт compressed и заменит контекст
+        flush();
         emit({
           type: "compressing",
           runId,
@@ -463,6 +480,7 @@ async function runAgent({ runId, roomId, input, tabId, windowId }) {
           items: conversation,
           attempt: compressions,
         });
+        synced = conversation.length;
         step = 0;
       }
       step++;
@@ -479,12 +497,8 @@ async function runAgent({ runId, roomId, input, tabId, windowId }) {
       conversation.push(...result.outputItems);
 
       if (!result.functionCalls.length) {
-        emit({
-          type: "done",
-          runId,
-          items: conversation.slice(compressions ? 0 : baseLen),
-          replace: compressions > 0,
-        });
+        flush();
+        emit({ type: "done", runId });
         return;
       }
 
@@ -614,8 +628,15 @@ async function runAgent({ runId, roomId, input, tabId, windowId }) {
           });
         }
       }
+
+      // шаг закрыт целиком (ответ модели + результаты тулов) — сохраняем в панели
+      flush();
     }
   } catch (e) {
+    // даже при обрыве отдаём всё, что успели наработать
+    try {
+      flush();
+    } catch (_) {}
     if (e.name === "AbortError") emit({ type: "aborted", runId });
     else
       emit({

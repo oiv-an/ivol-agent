@@ -475,16 +475,82 @@ function addChip(text, variant = "", withRetry = false) {
   chip.innerHTML =
     `<span class="dot"></span><span>${escapeHtml(text)}</span>` +
     (withRetry
-      ? `<button class="chip-retry" type="button" title="Повторить запрос">⟳ повторить</button>`
+      ? `<button class="chip-go" type="button" title="Продолжить с этого места, ничего не теряя">▶ продолжить</button>` +
+        `<button class="chip-retry" type="button" title="Откатить до последнего запроса и отправить заново">⟳ заново</button>`
       : "");
   els.messages.appendChild(chip);
   if (withRetry) {
+    chip.querySelector(".chip-go").addEventListener("click", () => {
+      continueRun(chip);
+    });
     chip.querySelector(".chip-retry").addEventListener("click", () => {
       retryLast(chip);
     });
   }
   scrollBottom();
   return chip;
+}
+
+// Продолжить прерванный запуск: контекст НЕ трогаем, просто запускаем
+// агента на том, что уже наработано. Ничего не теряется.
+function continueRun(chipEl) {
+  if (state.running) return;
+  const room = getRoom();
+  if (!room || !room.items.length) {
+    addChip("нечего продолжать — контекст пуст", "err");
+    return;
+  }
+
+  // хвост из function_call без ответа ломает API: дообрезаем такие вызовы
+  trimDanglingCalls(room);
+
+  if (chipEl) chipEl.remove();
+  // плашка ошибки в истории больше не нужна
+  for (let i = room.view.length - 1; i >= 0; i--) {
+    const v = room.view[i];
+    if (v.role === "tool" && v.retry) {
+      room.view.splice(i, 1);
+      break;
+    }
+  }
+
+  state.runId = "run_" + Date.now().toString(36);
+  setRunning(true);
+  setStatus("продолжаю…");
+  persist();
+  startWatchdog();
+
+  chrome.runtime
+    .sendMessage({
+      target: "background",
+      action: "run_agent",
+      payload: {
+        runId: state.runId,
+        roomId: room.id,
+        input: room.items,
+        tabId: room.tabId ?? (state.tab ? state.tab.id : null),
+        windowId: state.windowId,
+      },
+    })
+    .catch((e) =>
+      failRun(
+        "не удалось связаться с фоновым процессом: " +
+          String(e && e.message ? e.message : e),
+      ),
+    );
+}
+
+// function_call без парного function_call_output API не принимает.
+// Такое остаётся, если run оборвался между вызовом тула и его результатом.
+function trimDanglingCalls(room) {
+  const answered = new Set(
+    room.items
+      .filter((i) => i && i.type === "function_call_output")
+      .map((i) => i.call_id),
+  );
+  room.items = room.items.filter(
+    (i) => !(i && i.type === "function_call" && !answered.has(i.call_id)),
+  );
 }
 
 // Текст user-item'а в формате Responses API (для сравнения с пузырём в чате)
@@ -550,6 +616,8 @@ function retryLast(chipEl) {
 function runFrom(room, idx, chipEl) {
   const text = itemText(room.items[idx]);
   room.items = room.items.slice(0, idx + 1);
+  // хвост из function_call без ответа API не примет
+  trimDanglingCalls(room);
 
   // отрисовку режем по тому же сообщению: ищем его пузырь с конца
   let viewIdx = -1;
@@ -864,14 +932,18 @@ function handleEvent(evt) {
       }
       break;
 
+    // Прогресс шага: background отдаёт наработанные items по ходу дела,
+    // чтобы при обрыве (таймаут, ошибка, выгрузка воркера) ничего не пропало.
+    case "progress":
+      if (room && Array.isArray(evt.items) && evt.items.length) {
+        room.items.push(...evt.items);
+        persist();
+      }
+      break;
+
     case "done":
       stopWatchdog();
       finishStreamChunk();
-      if (room && evt.items) {
-        // после сжатия background прислал контекст целиком, а не хвост
-        if (evt.replace) room.items = evt.items;
-        else room.items.push(...evt.items);
-      }
       setRunning(false);
       persist();
       renderRoomsList();
