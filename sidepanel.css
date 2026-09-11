@@ -366,8 +366,39 @@ body {
   word-break: break-word;
 }
 
+.msg.assistant {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+}
+
 .msg.assistant .bubble {
+  flex: 1;
+  min-width: 0;
   word-break: break-word;
+}
+
+/* 📷 рядом с ответом: отправить модели снимок текущей страницы */
+.msg-shot {
+  flex: 0 0 auto;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+  padding: 4px 5px;
+  border-radius: 6px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.msg.assistant:hover .msg-shot {
+  opacity: 0.7;
+}
+.msg-shot:hover {
+  opacity: 1 !important;
+  background: var(--bg-hover);
+  color: var(--text);
 }
 
 .bubble p {

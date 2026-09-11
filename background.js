@@ -1,7 +1,7 @@
 // Service worker: agent-loop поверх Responses API, диспетчер tool'ов, permission gate.
 
 import { parseSSE } from "./lib/sse.js";
-import { buildTools, TOOL_RISK, RISK } from "./lib/tools.js";
+import { buildTools, TOOL_RISK, RISK, WEB_SEARCH_TOOL } from "./lib/tools.js";
 import { CONFIG, isValidEffort } from "./config.js";
 
 const DEFAULTS = { ...CONFIG };
@@ -89,6 +89,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       });
     });
     return;
+  }
+
+  // кнопка 📷 в панели: снимок текущей вкладки без участия модели
+  if (msg.action === "capture_screenshot") {
+    resolveTab(msg.tabId, msg.windowId)
+      .then(async (tab) => {
+        assertPageUsable(tab);
+        const shot = await takeScreenshot(tab);
+        sendResponse({
+          ok: true,
+          image: shot.__image,
+          size_kb: shot.size_kb,
+          url: shot.url,
+        });
+      })
+      .catch((e) => sendResponse({ ok: false, error: String(e.message || e) }));
+    return true;
   }
 
   // панель просит открыть страницу чата из истории
@@ -238,7 +255,10 @@ function systemPrompt(pageInfo, extra = {}) {
     "4. Действия fill_form, click_element, open_url и run_script требуют подтверждения пользователя. Это нормально, просто вызывай их.",
     "5. Если пользователь отклонил действие — не повторяй его молча, объясни альтернативу и спроси.",
     "6. run_script используй только когда обычных tool'ов недостаточно. Код должен быть коротким, читаемым и возвращать результат через return.",
-    "7. Для поиска в интернете используй встроенный web_search.",
+    extra.searchModel
+      ? "7. Для поиска в интернете вызывай tool web_search. Его выполняет отдельная поисковая модель, " +
+        "которая не видит наш диалог и страницу, поэтому клади в query весь нужный контекст одной самодостаточной фразой."
+      : "7. Для поиска в интернете используй встроенный web_search.",
     "8. Служебные страницы (chrome://, страница расширений, Chrome Web Store) расширениям недоступны. " +
       "Если вкладка такая — не пытайся её читать, а предложи открыть нужный сайт через open_url.",
     "9. Текст и карта элементов из get_page_context — основной способ понять страницу. " +
@@ -279,13 +299,7 @@ function systemPrompt(pageInfo, extra = {}) {
 
 // ---------- главный цикл ----------
 
-async function runAgent({
-  runId,
-  roomId,
-  input,
-  tabId,
-  windowId,
-}) {
+async function runAgent({ runId, roomId, input, tabId, windowId }) {
   const settings = await getSettings();
   if (!settings.apiKey) {
     emit({
@@ -309,6 +323,8 @@ async function runAgent({
     globalPrompt: settings.systemPrompt,
     sitePrompt,
     domain,
+    // поиск исполняет отдельная модель — правила для агента другие
+    searchModel: settings.webSearch !== false ? searchModelOf(settings) : "",
   });
 
   try {
@@ -398,7 +414,12 @@ async function runAgent({
           emit({ type: "tool_denied", runId, name: call.name });
         } else {
           try {
-            output = await executeTool(call.name, args, tab);
+            // поиск идёт отдельной моделью и может занять несколько секунд
+            if (call.name === "web_search") emit({ type: "web_search", runId });
+            output = await executeTool(call.name, args, tab, {
+              settings,
+              signal: controller.signal,
+            });
             emit({
               type: "tool_result",
               runId,
@@ -470,7 +491,11 @@ async function streamOnce({ settings, runId, instructions, input, signal }) {
     input,
     stream: true,
     reasoning: { effort: settings.effort || "high" },
-    tools: buildTools({ webSearch: settings.webSearch !== false }),
+    tools: buildTools({
+      webSearch: settings.webSearch !== false,
+      // задана search-модель — поиск уходит ей отдельным запросом (function-tool)
+      searchModel: searchModelOf(settings),
+    }),
     parallel_tool_calls: false,
     store: false,
   };
@@ -661,7 +686,15 @@ async function requestApproval(opts) {
 
 // ---------- выполнение tool'ов ----------
 
-async function executeTool(name, args, tab) {
+async function executeTool(name, args, tab, ctx = {}) {
+  // поиск идёт в сеть, страница ему не нужна — даже служебная вкладка не мешает
+  if (name === "web_search")
+    return runWebSearch({
+      query: args.query,
+      settings: ctx.settings,
+      signal: ctx.signal,
+    });
+
   // open_url — единственный tool, который работает даже на служебной странице
   if (name === "open_url") return openUrl(args, tab);
 
@@ -700,6 +733,79 @@ async function openUrl({ url, new_tab }, boundTab) {
   const t = await chrome.tabs.update(tab.id, { url });
   await waitForLoad(t.id);
   return { tab_id: t.id, url, opened_in: "текущая вкладка" };
+}
+
+// ---------- поиск отдельной моделью ----------
+
+// Модель для поиска: пусто/совпадает с основной — считаем, что отдельной нет
+function searchModelOf(settings) {
+  const m = String((settings && settings.searchModel) || "").trim();
+  return m && m !== settings.model ? m : "";
+}
+
+// Отдельный НЕстриминговый запрос к search-модели с нативным web_search.
+// Возвращаем модели готовую текстовую выжимку со ссылками.
+async function runWebSearch({ query, settings, signal }) {
+  const model = searchModelOf(settings);
+  if (!model) throw new Error("Модель для поиска не задана в настройках");
+
+  const q = String(query || "").trim();
+  if (!q) throw new Error("Пустой поисковый запрос");
+
+  const body = {
+    model,
+    instructions:
+      "Ты — поисковый модуль браузерного агента. Найди в интернете ответ на запрос пользователя " +
+      "и верни краткую фактическую выжимку на русском: главные факты, числа, даты. " +
+      "В конце списком приведи источники в формате «название — URL». Без рассуждений и без воды.",
+    input: [{ role: "user", content: [{ type: "input_text", text: q }] }],
+    tools: [WEB_SEARCH_TOOL],
+    stream: false,
+    store: false,
+  };
+
+  const res = await fetch(trimSlash(settings.baseUrl) + "/v1/responses", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: "Bearer " + settings.apiKey,
+    },
+    body: JSON.stringify(body),
+    signal,
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    const clean = txt
+      .replace(/<[^>]*>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    throw new Error(`поиск: API ${res.status} ${clean.slice(0, 160)}`);
+  }
+
+  const json = await res.json();
+  const text = extractOutputText(json);
+  if (!text) throw new Error("поисковая модель вернула пустой ответ");
+
+  return { query: q, model, result: text.slice(0, 20000) };
+}
+
+// Достаём текст из ответа Responses API, с запасным вариантом для Chat Completions
+function extractOutputText(json) {
+  if (!json) return "";
+  if (typeof json.output_text === "string" && json.output_text.trim())
+    return json.output_text.trim();
+
+  const parts = [];
+  for (const item of json.output || []) {
+    for (const c of item.content || []) {
+      if (c.type === "output_text" && c.text) parts.push(c.text);
+    }
+  }
+  if (parts.length) return parts.join("\n").trim();
+
+  const msg = json.choices && json.choices[0] && json.choices[0].message;
+  return msg && typeof msg.content === "string" ? msg.content.trim() : "";
 }
 
 // Открыть страницу чата из истории:
@@ -981,6 +1087,8 @@ function summarize(name, output) {
       return output.size_kb ? `снимок ${output.size_kb} КБ` : "снимок сделан";
     case "open_url":
       return output.url || "ок";
+    case "web_search":
+      return output.query ? `«${output.query}» (${output.model})` : "готово";
     case "run_script":
       return "выполнено";
     case "read_selection":

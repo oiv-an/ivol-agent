@@ -368,8 +368,91 @@ function createAssistantBubble() {
   const b = document.createElement("div");
   b.className = "bubble";
   wrap.appendChild(b);
+
+  // «Модель не видит страницу» — одним кликом отправляем ей снимок экрана
+  const shot = document.createElement("button");
+  shot.className = "msg-shot";
+  shot.type = "button";
+  shot.title = "Отправить модели снимок текущей страницы";
+  shot.textContent = "📷";
+  shot.addEventListener("click", () => sendScreenshot());
+  wrap.appendChild(shot);
+
   els.messages.appendChild(wrap);
   return b;
+}
+
+// Снимок видимой части вкладки уходит в чат как обычное сообщение пользователя
+// с input_image — дальше работает штатный agent-loop.
+async function sendScreenshot() {
+  if (state.running) return;
+  const room = getRoom();
+  if (!room) return;
+
+  setRunning(true);
+  setStatus("делаю снимок экрана…");
+
+  let shot;
+  try {
+    const resp = await chrome.runtime.sendMessage({
+      target: "background",
+      action: "capture_screenshot",
+      tabId: room.tabId ?? (state.tab ? state.tab.id : null),
+      windowId: state.windowId,
+    });
+    if (!resp || !resp.ok) throw new Error((resp && resp.error) || "нет ответа");
+    shot = resp;
+  } catch (e) {
+    setRunning(false);
+    addChip(
+      "не удалось сделать снимок: " + String(e && e.message ? e.message : e),
+      "err",
+    );
+    return;
+  }
+
+  const text = "Вот снимок видимой части текущей страницы. Посмотри на него.";
+  addUserMessage(text);
+  room.items.push({
+    role: "user",
+    content: [
+      { type: "input_text", text },
+      { type: "input_image", image_url: shot.image },
+    ],
+  });
+
+  // снимок — тоже полноценное сообщение: черновик становится настоящим чатом
+  delete room.draft;
+  if (room.title === "Новый чат") {
+    room.title = "Снимок экрана";
+    els.roomTitle.textContent = room.title;
+  }
+
+  addChip(`снимок отправлен${shot.size_kb ? `: ${shot.size_kb} КБ` : ""}`);
+
+  state.runId = "run_" + Date.now().toString(36);
+  setStatus("думаю…");
+  await persist();
+  startWatchdog();
+
+  try {
+    await chrome.runtime.sendMessage({
+      target: "background",
+      action: "run_agent",
+      payload: {
+        runId: state.runId,
+        roomId: room.id,
+        input: room.items,
+        tabId: room.tabId ?? (state.tab ? state.tab.id : null),
+        windowId: state.windowId,
+      },
+    });
+  } catch (e) {
+    failRun(
+      "не удалось связаться с фоновым процессом: " +
+        String(e && e.message ? e.message : e),
+    );
+  }
 }
 
 function addChip(text, variant = "", withRetry = false) {
@@ -641,7 +724,7 @@ function handleEvent(evt) {
       break;
 
     case "web_search":
-      addChip("поиск в интернете");
+      // чип с запросом придёт в tool_result, здесь только статус
       setStatus("ищу в интернете…");
       break;
 
@@ -757,6 +840,7 @@ function toolLabel(name) {
       open_url: "открыл ссылку",
       run_script: "выполнил скрипт",
       take_screenshot: "сделал снимок экрана",
+      web_search: "поиск в интернете",
     }[name] || name
   );
 }

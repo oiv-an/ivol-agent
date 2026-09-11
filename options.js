@@ -7,6 +7,7 @@ const DEFAULTS = {
   model: "",
   effort: "max",
   webSearch: true,
+  searchModel: "",
   systemPrompt: "",
 };
 
@@ -17,6 +18,7 @@ const el = {
   model: $("model"),
   effort: $("effort"),
   webSearch: $("webSearch"),
+  searchModel: $("searchModel"),
   systemPrompt: $("systemPrompt"),
   save: $("save"),
   test: $("test"),
@@ -46,6 +48,27 @@ function fillModelSelect(ids, selected) {
   }
 }
 
+// Тот же список моделей + пункт «как основная» (пустое значение)
+function fillSearchModelSelect(ids, selected) {
+  const cur = selected || el.searchModel.value || "";
+  el.searchModel.innerHTML = "";
+
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = "Как основная (нативный поиск)";
+  el.searchModel.appendChild(none);
+
+  const all = !cur || ids.includes(cur) ? ids : [cur, ...ids];
+  for (const id of all) {
+    if (!id) continue;
+    const o = document.createElement("option");
+    o.value = id;
+    o.textContent = id;
+    el.searchModel.appendChild(o);
+  }
+  el.searchModel.value = cur;
+}
+
 // Настройки собирает background: он единственный видит config.js.
 async function fetchSettings() {
   try {
@@ -69,6 +92,7 @@ async function load() {
   el.webSearch.checked = s.webSearch !== false;
   el.systemPrompt.value = s.systemPrompt || "";
   fillModelSelect([s.model], s.model);
+  fillSearchModelSelect(s.searchModel ? [s.searchModel] : [], s.searchModel);
   if (s.apiKey) loadModels(true);
 }
 
@@ -88,6 +112,7 @@ async function loadModels(silent = false) {
     const json = await res.json();
     const ids = (json.data || []).map((m) => m.id).sort();
     fillModelSelect(ids, el.model.value || DEFAULTS.model);
+    fillSearchModelSelect(ids, el.searchModel.value);
     if (!silent) setStatus(`Загружено моделей: ${ids.length}`, "ok");
   } catch (e) {
     if (!silent) setStatus("Не удалось загрузить: " + e.message, "err");
@@ -101,6 +126,8 @@ async function save() {
     model: el.model.value || DEFAULTS.model,
     effort: el.effort.value,
     webSearch: el.webSearch.checked,
+    // пусто = поиск выполняет основная модель нативно
+    searchModel: el.searchModel.value || "",
     systemPrompt: el.systemPrompt.value.trim(),
   };
   await chrome.storage.local.set({ settings });
