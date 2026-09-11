@@ -270,6 +270,7 @@ body {
   color: var(--text);
 }
 
+#task-file,
 #site-prompt {
   width: 100%;
   background: var(--bg);
@@ -284,8 +285,17 @@ body {
   min-height: 90px;
   line-height: 1.45;
 }
+#task-file:focus,
 #site-prompt:focus {
   border-color: #575757;
+}
+
+/* файл задачи длиннее промпта сайта, но панель не должна выезжать за экран */
+#task-file {
+  min-height: 180px;
+  max-height: 55vh;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
 }
 
 .site-panel-actions {
@@ -310,7 +320,8 @@ body {
   opacity: 0.8;
 }
 
-#btn-site-prompt.active {
+#btn-site-prompt.active,
+#btn-task.active {
   color: var(--accent);
 }
 

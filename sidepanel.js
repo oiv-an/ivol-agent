@@ -31,6 +31,14 @@ const els = {
   sitePermsReset: $("site-perms-reset"),
   sitePanelStatus: $("site-panel-status"),
   sitePanelClose: $("site-panel-close"),
+  btnTask: $("btn-task"),
+  taskPanel: $("task-panel"),
+  taskPanelClose: $("task-panel-close"),
+  taskFile: $("task-file"),
+  taskSave: $("task-save"),
+  taskClear: $("task-clear"),
+  taskInsert: $("task-insert"),
+  taskStatus: $("task-status"),
   modelSelect: $("model-select"),
   effortSelect: $("effort-select"),
   btnRefreshModels: $("btn-refresh-models"),
@@ -287,6 +295,8 @@ async function refreshTab({ switchRoom = true } = {}) {
 function renderRoom() {
   const room = getRoom();
   els.roomTitle.textContent = room ? room.title : "Новый чат";
+  // файл задачи свой у каждого чата
+  loadTaskFile();
   els.messages.innerHTML = "";
   if (!room || !room.view.length) {
     els.messages.appendChild(els.empty);
@@ -400,7 +410,8 @@ async function sendScreenshot() {
       tabId: room.tabId ?? (state.tab ? state.tab.id : null),
       windowId: state.windowId,
     });
-    if (!resp || !resp.ok) throw new Error((resp && resp.error) || "нет ответа");
+    if (!resp || !resp.ok)
+      throw new Error((resp && resp.error) || "нет ответа");
     shot = resp;
   } catch (e) {
     setRunning(false);
@@ -775,11 +786,36 @@ function handleEvent(evt) {
       addChip("разрешение сохранено для " + (evt.key || "").split(":")[1]);
       break;
 
+    // агент упёрся в лимит шагов и просит модель пересказать диалог
+    case "compressing":
+      setStatus(`сжимаю контекст (${evt.attempt}/${evt.max})…`);
+      break;
+
+    case "compressed": {
+      // контекст комнаты заменяем сжатым: дальше агент работает с ним
+      if (room && Array.isArray(evt.items)) room.items = evt.items;
+      const t = `контекст сжат (${evt.attempt}) — продолжаю работу`;
+      addChip(t);
+      pushView({ role: "tool", text: t });
+      persist();
+      break;
+    }
+
+    // агент обновил файл задачи — держим открытую панель в актуальном виде
+    case "task_file":
+      markTaskButton(evt.content);
+      if (!els.taskPanel.classList.contains("hidden")) {
+        els.taskFile.value = evt.content || "";
+      }
+      break;
+
     case "done":
       stopWatchdog();
       finishStreamChunk();
       if (room && evt.items) {
-        room.items.push(...evt.items);
+        // после сжатия background прислал контекст целиком, а не хвост
+        if (evt.replace) room.items = evt.items;
+        else room.items.push(...evt.items);
       }
       setRunning(false);
       persist();
@@ -841,6 +877,8 @@ function toolLabel(name) {
       run_script: "выполнил скрипт",
       take_screenshot: "сделал снимок экрана",
       web_search: "поиск в интернете",
+      task_write: "переписал файл задачи",
+      task_append: "дописал в файл задачи",
     }[name] || name
   );
 }
@@ -1115,6 +1153,15 @@ function roomItem(r) {
     // без могилы persist() вернёт комнату обратно при слиянии с storage
     state.deleted.add(r.id);
     state.rooms = state.rooms.filter((x) => x.id !== r.id);
+    // файл задачи удалённого чата больше не нужен
+    chrome.runtime
+      .sendMessage({
+        target: "background",
+        action: "save_task_file",
+        roomId: r.id,
+        content: "",
+      })
+      .catch(() => {});
     if (state.currentRoomId === r.id) {
       const next = savedRooms()[0];
       // сохранённых чатов не осталось — открываем чистый черновик
@@ -1162,6 +1209,7 @@ function toggleSitePanel(force) {
   els.sitePanel.classList.toggle("hidden", !show);
   if (show) {
     toggleRooms(false);
+    els.taskPanel.classList.add("hidden");
     loadSitePrompt();
     els.sitePromptInput.focus();
   }
@@ -1209,10 +1257,93 @@ function toggleRooms(force) {
   els.roomsPanel.classList.toggle("hidden", !show);
   if (show) {
     els.sitePanel.classList.add("hidden");
+    els.taskPanel.classList.add("hidden");
     renderRoomsList();
     els.roomsSearch.focus();
   }
 }
+
+// ---------- файл задачи ----------
+
+function taskStatus(text) {
+  els.taskStatus.textContent = text || "";
+  if (text) setTimeout(() => (els.taskStatus.textContent = ""), 2000);
+}
+
+// подсветка кнопки 📋, когда в файле что-то есть
+function markTaskButton(content) {
+  els.btnTask.classList.toggle("active", !!String(content || "").trim());
+}
+
+async function loadTaskFile() {
+  const room = getRoom();
+  if (!room) return "";
+  try {
+    const resp = await chrome.runtime.sendMessage({
+      target: "background",
+      action: "get_task_file",
+      roomId: room.id,
+    });
+    const text = (resp && resp.content) || "";
+    els.taskFile.value = text;
+    markTaskButton(text);
+    return text;
+  } catch (_) {
+    return "";
+  }
+}
+
+async function saveTaskFile(text) {
+  const room = getRoom();
+  if (!room) return;
+  const resp = await chrome.runtime.sendMessage({
+    target: "background",
+    action: "save_task_file",
+    roomId: room.id,
+    content: text,
+  });
+  if (resp && resp.ok) {
+    els.taskFile.value = resp.content || "";
+    markTaskButton(resp.content);
+    taskStatus("сохранено");
+  } else {
+    taskStatus("ошибка сохранения");
+  }
+}
+
+function toggleTaskPanel(force) {
+  const show =
+    force !== undefined ? force : els.taskPanel.classList.contains("hidden");
+  els.taskPanel.classList.toggle("hidden", !show);
+  if (show) {
+    toggleRooms(false);
+    els.sitePanel.classList.add("hidden");
+    loadTaskFile();
+  }
+}
+
+els.btnTask.addEventListener("click", () => toggleTaskPanel());
+els.taskPanelClose.addEventListener("click", () => toggleTaskPanel(false));
+els.taskSave.addEventListener("click", () => saveTaskFile(els.taskFile.value));
+els.taskClear.addEventListener("click", () => {
+  els.taskFile.value = "";
+  saveTaskFile("");
+});
+// вывести файл задачи в чат как обычное сообщение ассистента
+els.taskInsert.addEventListener("click", () => {
+  const text = els.taskFile.value.trim();
+  if (!text) {
+    taskStatus("файл пуст");
+    return;
+  }
+  const el = createAssistantBubble();
+  el.innerHTML = renderMarkdown(text);
+  bindCopyButtons(el);
+  pushView({ role: "assistant", text });
+  persist();
+  toggleTaskPanel(false);
+  scrollBottom();
+});
 
 // ---------- ввод ----------
 
@@ -1244,6 +1375,7 @@ els.btnNew.addEventListener("click", () => {
   if (!cur || !cur.draft || cur.items.length) createRoom(true, state.tab);
   toggleRooms(false);
   toggleSitePanel(false);
+  toggleTaskPanel(false);
   renderRoomsList();
 });
 els.btnRooms.addEventListener("click", () => toggleRooms());

@@ -13,6 +13,7 @@
       <div class="tab-title" id="tab-title"></div>
     </div>
     <button id="btn-site-prompt" class="icon-btn" title="Системный промпт для этого сайта">📝</button>
+    <button id="btn-task" class="icon-btn" title="Файл задачи — память агента по этому чату">📋</button>
     <button id="btn-new" class="icon-btn" title="Новая задача — очистить контекст">＋</button>
     <button id="btn-settings" class="icon-btn" title="Настройки">⚙</button>
   </header>
@@ -42,6 +43,22 @@
       <span id="site-panel-status" class="site-panel-status"></span>
     </div>
     <div class="site-panel-hint">Промпт привязан к домену и действует во всех чатах этого сайта. Глобальный промпт — в настройках ⚙.</div>
+  </aside>
+
+  <aside id="task-panel" class="site-panel hidden">
+    <div class="site-panel-head">
+      <span>Файл задачи</span>
+      <button id="task-panel-close" class="icon-btn" title="Закрыть">✕</button>
+    </div>
+    <textarea id="task-file" rows="12" spellcheck="false"
+      placeholder="Здесь агент ведёт память по этой задаче: цель, найденные ссылки, результаты. Можно править вручную."></textarea>
+    <div class="site-panel-actions">
+      <button id="task-save" class="btn primary">Сохранить</button>
+      <button id="task-clear" class="btn ghost">Очистить</button>
+      <button id="task-insert" class="btn ghost" title="Вставить содержимое файла в чат">Вывести в чат</button>
+      <span id="task-status" class="site-panel-status"></span>
+    </div>
+    <div class="site-panel-hint">Файл привязан к этому чату и не теряется при сжатии контекста и перезапуске браузера. Агент пишет в него сам через task_write / task_append.</div>
   </aside>
 
   <main id="messages" class="messages">

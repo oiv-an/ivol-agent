@@ -16,7 +16,7 @@
     h1 { font-size: 20px; margin: 0 0 4px; }
     .sub { color: var(--dim); font-size: 13px; margin-bottom: 26px; }
     label { display: block; margin-bottom: 6px; font-size: 13px; color: var(--dim); }
-    input[type=text], input[type=password], select, textarea {
+    input[type=text], input[type=password], input[type=number], select, textarea {
       width: 100%; padding: 9px 11px; background: var(--elev);
       border: 1px solid var(--border); border-radius: 8px; color: var(--text);
       font: inherit; outline: none; margin-bottom: 18px;
@@ -77,6 +77,21 @@
       Когда выбрана отдельная модель, основная получает tool <code>web_search</code>: она формулирует запрос,
       а поиск выполняет эта модель отдельным вызовом и возвращает выжимку со ссылками.
       «Как основная» — поиск работает по-старому, внутри запроса основной модели.
+    </div>
+
+    <label for="maxSteps">Лимит шагов агента</label>
+    <input type="number" id="maxSteps" min="1" max="200" step="1" placeholder="12">
+    <div class="hint">
+      Сколько обращений к модели (шагов «туда-обратно» с вызовами tool'ов) агент делает подряд,
+      прежде чем контекст будет сжат. Больше шагов — длиннее автономная работа и выше расход токенов.
+    </div>
+
+    <label for="maxCompressions">Сжатий контекста за запуск</label>
+    <input type="number" id="maxCompressions" min="0" max="50" step="1" placeholder="5">
+    <div class="hint">
+      Достигнут лимит шагов — агент просит модель сжать всю беседу в сводку и продолжает работу
+      с этим сжатым контекстом. Здесь — сколько раз подряд так можно. <code>0</code> — не сжимать,
+      а останавливаться, как раньше. Файл задачи (кнопка 📋 в панели) при сжатии не теряется.
     </div>
 
     <label for="systemPrompt">Глобальный системный промпт</label>

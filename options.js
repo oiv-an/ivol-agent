@@ -9,6 +9,8 @@ const DEFAULTS = {
   webSearch: true,
   searchModel: "",
   systemPrompt: "",
+  maxSteps: 12,
+  maxCompressions: 5,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -19,6 +21,8 @@ const el = {
   effort: $("effort"),
   webSearch: $("webSearch"),
   searchModel: $("searchModel"),
+  maxSteps: $("maxSteps"),
+  maxCompressions: $("maxCompressions"),
   systemPrompt: $("systemPrompt"),
   save: $("save"),
   test: $("test"),
@@ -33,6 +37,12 @@ function setStatus(text, cls = "") {
 
 function trimSlash(s) {
   return String(s || "").replace(/\/+$/, "");
+}
+
+function clampInt(v, min, max, fallback) {
+  const n = parseInt(v, 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
 }
 
 function fillModelSelect(ids, selected) {
@@ -90,6 +100,13 @@ async function load() {
   el.apiKey.value = s.apiKey;
   el.effort.value = s.effort;
   el.webSearch.checked = s.webSearch !== false;
+  el.maxSteps.value = clampInt(s.maxSteps, 1, 200, DEFAULTS.maxSteps);
+  el.maxCompressions.value = clampInt(
+    s.maxCompressions,
+    0,
+    50,
+    DEFAULTS.maxCompressions,
+  );
   el.systemPrompt.value = s.systemPrompt || "";
   fillModelSelect([s.model], s.model);
   fillSearchModelSelect(s.searchModel ? [s.searchModel] : [], s.searchModel);
@@ -128,6 +145,14 @@ async function save() {
     webSearch: el.webSearch.checked,
     // пусто = поиск выполняет основная модель нативно
     searchModel: el.searchModel.value || "",
+    // лимит шагов и автосжатие контекста
+    maxSteps: clampInt(el.maxSteps.value, 1, 200, DEFAULTS.maxSteps),
+    maxCompressions: clampInt(
+      el.maxCompressions.value,
+      0,
+      50,
+      DEFAULTS.maxCompressions,
+    ),
     systemPrompt: el.systemPrompt.value.trim(),
   };
   await chrome.storage.local.set({ settings });

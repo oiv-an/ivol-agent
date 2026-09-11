@@ -7,7 +7,11 @@ import { CONFIG, isValidEffort } from "./config.js";
 const DEFAULTS = { ...CONFIG };
 
 const APPROVAL_TIMEOUT_MS = 120000;
-const MAX_LOOP_STEPS = 12;
+// Запасные значения, если в настройках ничего не задано
+const DEFAULT_MAX_STEPS = 12;
+const DEFAULT_MAX_COMPRESSIONS = 5;
+// Файл задачи целиком уходит в системный промпт — держим его в разумных рамках
+const TASK_FILE_LIMIT = 12000;
 
 // agent_id -> resolve функции ожидающих подтверждений
 const pendingApprovals = new Map();
@@ -74,6 +78,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.action === "save_site_prompt") {
     saveSitePrompt(msg.domain, msg.prompt)
       .then(() => sendResponse({ ok: true }))
+      .catch((e) => sendResponse({ ok: false, error: String(e.message || e) }));
+    return true;
+  }
+
+  // ---- файл задачи (персистентная память агента по комнате) ----
+  if (msg.action === "get_task_file") {
+    getTaskFile(msg.roomId)
+      .then((content) => sendResponse({ ok: true, content }))
+      .catch(() => sendResponse({ ok: true, content: "" }));
+    return true;
+  }
+
+  if (msg.action === "save_task_file") {
+    setTaskFile(msg.roomId, msg.content)
+      .then((content) => sendResponse({ ok: true, content }))
       .catch((e) => sendResponse({ ok: false, error: String(e.message || e) }));
     return true;
   }
@@ -192,7 +211,57 @@ async function getSettings() {
   if (!s.model) s.model = DEFAULTS.model;
   // старое/битое значение из storage не должно молча деградировать в medium
   if (!isValidEffort(s.effort)) s.effort = DEFAULTS.effort;
+  s.maxSteps = clampInt(s.maxSteps, 1, 200, DEFAULT_MAX_STEPS);
+  s.maxCompressions = clampInt(
+    s.maxCompressions,
+    0,
+    50,
+    DEFAULT_MAX_COMPRESSIONS,
+  );
   return s;
+}
+
+function clampInt(v, min, max, fallback) {
+  const n = parseInt(v, 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
+// ---------- файл задачи (персистентная память агента) ----------
+// Хранится по комнате: taskFiles[roomId] = markdown-текст.
+// Переживает сжатие контекста, перезапуск воркера и браузера.
+
+async function getTaskFiles() {
+  const { taskFiles } = await chrome.storage.local.get(["taskFiles"]);
+  return taskFiles && typeof taskFiles === "object" ? taskFiles : {};
+}
+
+async function getTaskFile(roomId) {
+  if (!roomId) return "";
+  const all = await getTaskFiles();
+  return all[roomId] || "";
+}
+
+// Возвращает итоговое содержимое (уже обрезанное), чтобы панель и модель
+// видели ровно то, что реально лежит в storage.
+async function setTaskFile(roomId, content) {
+  if (!roomId) throw new Error("Нет id чата для файла задачи");
+  const all = await getTaskFiles();
+  let text = String(content || "").trim();
+  if (text.length > TASK_FILE_LIMIT) {
+    text = text.slice(0, TASK_FILE_LIMIT) + "\n…(файл обрезан по лимиту)";
+  }
+  if (text) all[roomId] = text;
+  else delete all[roomId];
+  await chrome.storage.local.set({ taskFiles: all });
+  return text;
+}
+
+async function appendTaskFile(roomId, content) {
+  const prev = await getTaskFile(roomId);
+  const add = String(content || "").trim();
+  if (!add) throw new Error("Пустой текст для файла задачи");
+  return setTaskFile(roomId, prev ? prev + "\n" + add : add);
 }
 
 // ---------- разрешения по домену (глобальные, не привязаны к чату) ----------
@@ -265,6 +334,18 @@ function systemPrompt(pageInfo, extra = {}) {
       "take_screenshot нужен только когда текста объективно не хватает: график, диаграмма, canvas, " +
       "картинка без alt, вопрос про вёрстку или внешний вид. Не делай снимок «на всякий случай».",
     "",
+    "ФАЙЛ ЗАДАЧИ (твоя постоянная память):",
+    "- У тебя есть файл задачи, привязанный к этому чату. Он НЕ теряется при сжатии контекста и при перезапуске браузера, " +
+      "и его текущее содержимое ты всегда видишь ниже в этом промпте.",
+    "- Как только пользователь дал задачу из нескольких шагов (поиск, подбор, сбор ссылок, длинная работа на сайте) — " +
+      "сразу вызови task_write и запиши цель и план.",
+    "- Каждую находку (ссылку, товар, цену, факт, результат) немедленно добавляй через task_append. " +
+      "Не держи результаты только в голове: контекст может быть сжат, файл — нет.",
+    "- task_write используй, чтобы переписать файл целиком: обновить статус, убрать мусор, ужать разросшийся файл.",
+    "- Когда считаешь задачу выполненной — выведи итог из файла задачи прямо в чат обычным сообщением " +
+      "(список найденного со ссылками) и отметь в файле, что задача закрыта.",
+    "- Для коротких вопросов «одним ответом» файл задачи не нужен, не засоряй его.",
+    "",
     "СТИЛЬ:",
     "- Отвечай на русском, по делу, без воды и без лишних расшаркиваний.",
     "- Используй markdown: списки, таблицы, блоки кода.",
@@ -294,6 +375,15 @@ function systemPrompt(pageInfo, extra = {}) {
     parts.push("", `ИНСТРУКЦИИ ДЛЯ САЙТА ${extra.domain || ""}:`.trim(), site);
   }
 
+  const task = String(extra.taskFile || "").trim();
+  parts.push(
+    "",
+    "ТЕКУЩЕЕ СОДЕРЖИМОЕ ФАЙЛА ЗАДАЧИ:",
+    task
+      ? task
+      : "(файл пуст — если задача не однострочная, начни с task_write)",
+  );
+
   return parts.join("\n");
 }
 
@@ -311,7 +401,7 @@ async function runAgent({ runId, roomId, input, tabId, windowId }) {
   }
 
   const tab = await resolveTab(tabId, windowId);
-  const conversation = [...input];
+  let conversation = [...input];
   const baseLen = conversation.length;
   const controller = new AbortController();
   running.set(runId, controller);
@@ -319,16 +409,64 @@ async function runAgent({ runId, roomId, input, tabId, windowId }) {
   // Домен вкладки — ключ и для разрешений, и для системного промпта сайта
   const domain = normDomain(tab && tab.url ? safeHost(tab.url) : "");
   const sitePrompt = await getSitePrompt(domain);
-  const instructions = systemPrompt(tab, {
-    globalPrompt: settings.systemPrompt,
-    sitePrompt,
-    domain,
-    // поиск исполняет отдельная модель — правила для агента другие
-    searchModel: settings.webSearch !== false ? searchModelOf(settings) : "",
-  });
+
+  // Файл задачи целиком идёт в системный промпт: после каждой записи
+  // инструкции пересобираем, чтобы модель видела актуальное содержимое.
+  let taskFile = await getTaskFile(roomId);
+  const buildInstructions = () =>
+    systemPrompt(tab, {
+      globalPrompt: settings.systemPrompt,
+      sitePrompt,
+      domain,
+      // поиск исполняет отдельная модель — правила для агента другие
+      searchModel: settings.webSearch !== false ? searchModelOf(settings) : "",
+      taskFile,
+    });
+  let instructions = buildInstructions();
+
+  const maxSteps = settings.maxSteps;
+  const maxCompressions = settings.maxCompressions;
+  let compressions = 0;
+  let step = 0;
 
   try {
-    for (let step = 0; step < MAX_LOOP_STEPS; step++) {
+    while (true) {
+      // Лимит шагов исчерпан — вместо остановки сжимаем контекст и работаем дальше
+      if (step >= maxSteps) {
+        if (compressions >= maxCompressions) {
+          emit({
+            type: "error",
+            runId,
+            message: `Лимит шагов (${maxSteps}) и сжатий контекста (${maxCompressions}) исчерпан. Останавливаюсь. Что делать дальше?`,
+          });
+          return;
+        }
+        compressions++;
+        emit({
+          type: "compressing",
+          runId,
+          step,
+          attempt: compressions,
+          max: maxCompressions,
+        });
+        conversation = await compressConversation({
+          settings,
+          conversation,
+          instructions,
+          signal: controller.signal,
+        });
+        // всё, что модель успела наработать, уже в панели — в комнату
+        // отдаём сжатый контекст, иначе история раздуется снова
+        emit({
+          type: "compressed",
+          runId,
+          items: conversation,
+          attempt: compressions,
+        });
+        step = 0;
+      }
+      step++;
+
       const result = await streamOnce({
         settings,
         runId,
@@ -341,7 +479,12 @@ async function runAgent({ runId, roomId, input, tabId, windowId }) {
       conversation.push(...result.outputItems);
 
       if (!result.functionCalls.length) {
-        emit({ type: "done", runId, items: conversation.slice(baseLen) });
+        emit({
+          type: "done",
+          runId,
+          items: conversation.slice(compressions ? 0 : baseLen),
+          replace: compressions > 0,
+        });
         return;
       }
 
@@ -419,7 +562,16 @@ async function runAgent({ runId, roomId, input, tabId, windowId }) {
             output = await executeTool(call.name, args, tab, {
               settings,
               signal: controller.signal,
+              roomId,
             });
+            // файл задачи изменился — обновляем его в системном промпте
+            if (output && output.__taskFile != null) {
+              taskFile = output.__taskFile;
+              output = { ...output };
+              delete output.__taskFile;
+              instructions = buildInstructions();
+              emit({ type: "task_file", runId, roomId, content: taskFile });
+            }
             emit({
               type: "tool_result",
               runId,
@@ -463,12 +615,6 @@ async function runAgent({ runId, roomId, input, tabId, windowId }) {
         }
       }
     }
-
-    emit({
-      type: "error",
-      runId,
-      message: "Превышен лимит шагов агента. Останавливаюсь.",
-    });
   } catch (e) {
     if (e.name === "AbortError") emit({ type: "aborted", runId });
     else
@@ -695,6 +841,21 @@ async function executeTool(name, args, tab, ctx = {}) {
       signal: ctx.signal,
     });
 
+  // файл задачи живёт в storage, страница ему тоже не нужна
+  if (name === "task_write" || name === "task_append") {
+    const content =
+      name === "task_write"
+        ? await setTaskFile(ctx.roomId, args.content)
+        : await appendTaskFile(ctx.roomId, args.content);
+    return {
+      ok: true,
+      chars: content.length,
+      note: "Файл задачи обновлён. Его актуальное содержимое ты видишь в системном промпте.",
+      // вытаскивается в runAgent: обновляет промпт и уведомляет панель
+      __taskFile: content,
+    };
+  }
+
   // open_url — единственный tool, который работает даже на служебной странице
   if (name === "open_url") return openUrl(args, tab);
 
@@ -733,6 +894,83 @@ async function openUrl({ url, new_tab }, boundTab) {
   const t = await chrome.tabs.update(tab.id, { url });
   await waitForLoad(t.id);
   return { tab_id: t.id, url, opened_in: "текущая вкладка" };
+}
+
+// ---------- сжатие контекста ----------
+
+// Лимит шагов исчерпан: просим модель пересказать диалог и продолжаем работу
+// с коротким контекстом. Файл задачи при этом не трогаем — он и есть память.
+async function compressConversation({
+  settings,
+  conversation,
+  instructions,
+  signal,
+}) {
+  const ask = {
+    role: "user",
+    content: [
+      {
+        type: "input_text",
+        text:
+          "СЛУЖЕБНЫЙ ЗАПРОС. Контекст диалога переполнен и будет очищен. " +
+          "Сожми ВСЮ нашу беседу в подробную сводку, по которой ты сможешь продолжить работу как ни в чём не бывало. " +
+          "Формат — markdown, разделы: 1) исходная задача пользователя дословно; 2) что уже сделано (действия, страницы, поиски); " +
+          "3) найденные результаты и ссылки; 4) выводы и ограничения, которые важно помнить; 5) что осталось сделать — следующий шаг. " +
+          "Не теряй URL, числа, названия и договорённости. Не задавай вопросов, не вызывай tool'ы — верни только текст сводки.",
+      },
+    ],
+  };
+
+  const body = {
+    model: settings.model,
+    instructions,
+    input: [...conversation, ask],
+    stream: false,
+    store: false,
+  };
+
+  const res = await fetch(trimSlash(settings.baseUrl) + "/v1/responses", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: "Bearer " + settings.apiKey,
+    },
+    body: JSON.stringify(body),
+    signal,
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(
+      `сжатие контекста: API ${res.status} ${txt.replace(/<[^>]*>/g, " ").slice(0, 160)}`,
+    );
+  }
+
+  const summary = extractOutputText(await res.json());
+  if (!summary) throw new Error("сжатие контекста: пустой ответ модели");
+
+  // Новый контекст: первое сообщение пользователя (исходная задача) + сводка.
+  // Хвост с function_call/function_call_output не сохраняем: без своих
+  // function_call'ов они невалидны, а всё нужное уже в сводке и в файле задачи.
+  const firstUser = conversation.find(
+    (i) => i.role === "user" && Array.isArray(i.content),
+  );
+
+  const items = [];
+  if (firstUser) items.push(firstUser);
+  items.push({
+    role: "user",
+    content: [
+      {
+        type: "input_text",
+        text:
+          "СЖАТЫЙ КОНТЕКСТ ПРЕДЫДУЩЕЙ ЧАСТИ ДИАЛОГА (составлен тобой же):\n\n" +
+          summary +
+          "\n\nПродолжай работу с этого места. Файл задачи по-прежнему доступен в системном промпте.",
+      },
+    ],
+  });
+  return items;
 }
 
 // ---------- поиск отдельной моделью ----------
@@ -1089,6 +1327,9 @@ function summarize(name, output) {
       return output.url || "ок";
     case "web_search":
       return output.query ? `«${output.query}» (${output.model})` : "готово";
+    case "task_write":
+    case "task_append":
+      return `файл задачи: ${output.chars || 0} символов`;
     case "run_script":
       return "выполнено";
     case "read_selection":
