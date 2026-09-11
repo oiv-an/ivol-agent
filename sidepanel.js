@@ -57,6 +57,7 @@ let state = {
   settings: null,
   tab: null, // текущая вкладка: { id, url, title, host, restricted }
   watchdog: null,
+  watchdogMs: 0, // текущий лимит ожидания, зависит от типа операции
   windowId: null, // окно, в котором живёт ЭТА панель
   roomsFilter: "", // выбранный домен в истории чатов ("" = все сайты)
   deleted: new Set(), // id удалённых комнат: чтобы слияние не воскрешало их
@@ -682,15 +683,23 @@ async function send(textOverride) {
   }
 }
 
-// Если background молчит слишком долго — не висим бесконечно
-function startWatchdog() {
+// Если background молчит слишком долго — не висим бесконечно.
+// Обычный шаг: 3 минуты (reasoning-модели думают долго).
+// Сжатие контекста и поиск отдельной моделью — нестриминговые запросы,
+// во время которых событий нет вообще, поэтому для них таймаут больше.
+const WATCHDOG_MS = 180000;
+const WATCHDOG_LONG_MS = 600000;
+
+function startWatchdog(ms = WATCHDOG_MS) {
   stopWatchdog();
+  state.watchdogMs = ms;
   state.watchdog = setTimeout(() => {
     if (!state.running) return;
     failRun(
-      "фоновый процесс не ответил за 60 секунд. Проверь консоль service worker на chrome://extensions",
+      `фоновый процесс не ответил за ${Math.round(ms / 1000)} секунд. ` +
+        "Проверь консоль service worker на chrome://extensions",
     );
-  }, 60000);
+  }, ms);
 }
 
 function stopWatchdog() {
@@ -698,6 +707,7 @@ function stopWatchdog() {
     clearTimeout(state.watchdog);
     state.watchdog = null;
   }
+  state.watchdogMs = WATCHDOG_MS;
 }
 
 function failRun(message) {
@@ -732,8 +742,12 @@ chrome.runtime.onMessage.addListener((msg) => {
     return;
   }
   if (msg.runId && state.runId && msg.runId !== state.runId) return;
-  // background жив — перезапускаем таймер ожидания
-  if (state.running) startWatchdog();
+  // background жив — перезапускаем таймер ожидания.
+  // Долгие нестриминговые операции получают увеличенный лимит.
+  if (state.running) {
+    const long = msg.type === "compressing" || msg.type === "web_search";
+    startWatchdog(long ? WATCHDOG_LONG_MS : WATCHDOG_MS);
+  }
   handleEvent(msg);
 });
 
