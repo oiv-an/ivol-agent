@@ -91,6 +91,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return;
   }
 
+  // панель просит открыть страницу чата из истории
+  if (msg.action === "focus_or_open_url") {
+    focusOrOpenUrl(msg.url, msg.windowId)
+      .then((tab) => sendResponse({ ok: true, tab: tabInfo(tab) }))
+      .catch((e) => sendResponse({ ok: false, error: String(e.message || e) }));
+    return true;
+  }
+
   // панель спрашивает, какая вкладка активна в ЕЁ окне
   if (msg.action === "get_tab_info") {
     getActiveTab(msg.windowId)
@@ -692,6 +700,49 @@ async function openUrl({ url, new_tab }, boundTab) {
   const t = await chrome.tabs.update(tab.id, { url });
   await waitForLoad(t.id);
   return { tab_id: t.id, url, opened_in: "текущая вкладка" };
+}
+
+// Открыть страницу чата из истории:
+// 1) если такая вкладка уже есть в окне панели — просто активируем её;
+// 2) иначе ведём текущую активную вкладку на нужный адрес;
+// 3) на служебной странице (chrome://) переход невозможен — открываем новую вкладку.
+async function focusOrOpenUrl(url, windowId) {
+  if (!/^https?:\/\//i.test(String(url || "")))
+    throw new Error("URL должен начинаться с http:// или https://");
+
+  const all = await chrome.tabs.query(
+    windowId != null ? { windowId } : { lastFocusedWindow: true },
+  );
+
+  // точное совпадение адреса, хвост #якоря игнорируем
+  const same = (a, b) => stripHash(a) === stripHash(b);
+  const found = all.find((t) => t.url && same(t.url, url));
+  if (found) {
+    const t = await chrome.tabs.update(found.id, { active: true });
+    try {
+      await chrome.windows.update(t.windowId, { focused: true });
+    } catch (_) {}
+    return t;
+  }
+
+  const active = await getActiveTab(windowId).catch(() => null);
+  if (!active || isRestricted(active.url)) {
+    const t = await chrome.tabs.create({
+      url,
+      active: true,
+      ...(windowId != null ? { windowId } : {}),
+    });
+    await waitForLoad(t.id);
+    return (await chrome.tabs.get(t.id)) || t;
+  }
+
+  const t = await chrome.tabs.update(active.id, { url, active: true });
+  await waitForLoad(t.id);
+  return (await chrome.tabs.get(t.id)) || t;
+}
+
+function stripHash(u) {
+  return String(u || "").split("#")[0];
 }
 
 // Снимок видимой части вкладки + сжатие, чтобы не жечь токены

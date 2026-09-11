@@ -51,6 +51,7 @@ let state = {
   watchdog: null,
   windowId: null, // окно, в котором живёт ЭТА панель
   roomsFilter: "", // выбранный домен в истории чатов ("" = все сайты)
+  deleted: new Set(), // id удалённых комнат: чтобы слияние не воскрешало их
 };
 
 // ---------- хранилище ----------
@@ -60,42 +61,80 @@ async function loadState() {
     "rooms",
     "currentRoomByWindow",
     "settings",
+    "deletedRooms",
   ]);
-  state.rooms = data.rooms || [];
+  state.deleted = new Set(data.deletedRooms || []);
+  state.rooms = (data.rooms || []).filter((r) => !state.deleted.has(r.id));
   // у каждого окна своя активная комната
   const byWin = data.currentRoomByWindow || {};
   state.currentRoomId = byWin[state.windowId] || null;
   state.settings = data.settings || {};
-  if (!state.rooms.length) createRoom(false);
-  if (!state.currentRoomId || !getRoom())
-    state.currentRoomId = state.rooms[0].id;
+  // ничего не восстановилось — открываем пустой черновик (в историю он не идёт)
+  if (!state.currentRoomId || !getRoom()) createRoom(false);
 }
 
 // Панелей может быть несколько (по одной на окно) — пишем со слиянием,
 // иначе соседнее окно затрёт наши комнаты целиком.
 async function persist() {
-  const data = await chrome.storage.local.get(["rooms", "currentRoomByWindow"]);
+  const data = await chrome.storage.local.get([
+    "rooms",
+    "currentRoomByWindow",
+    "deletedRooms",
+  ]);
   const stored = data.rooms || [];
 
+  // удалённое в других панелях тоже уважаем
+  const deleted = new Set([...(data.deletedRooms || []), ...state.deleted]);
+  state.deleted = deleted;
+
+  // в storage уходят только «настоящие» комнаты, черновик остаётся в памяти
   const merged = [];
   const seen = new Set();
   for (const r of state.rooms) {
+    if (deleted.has(r.id) || r.draft) continue;
     merged.push(r);
     seen.add(r.id);
   }
   for (const r of stored) {
-    if (!seen.has(r.id)) merged.push(r);
+    if (!seen.has(r.id) && !deleted.has(r.id)) merged.push(r);
   }
 
   const byWin = { ...(data.currentRoomByWindow || {}) };
-  if (state.windowId != null) byWin[state.windowId] = state.currentRoomId;
+  if (state.windowId != null) {
+    const cur = getRoom();
+    // указатель на черновик сохранять бессмысленно — его после перезапуска нет
+    if (cur && !cur.draft) byWin[state.windowId] = state.currentRoomId;
+    else delete byWin[state.windowId];
+  }
 
-  state.rooms = merged;
-  await chrome.storage.local.set({ rooms: merged, currentRoomByWindow: byWin });
+  // черновик текущего окна возвращаем в начало списка
+  const drafts = state.rooms.filter((r) => r.draft && !deleted.has(r.id));
+  state.rooms = [...drafts, ...merged];
+
+  await chrome.storage.local.set({
+    rooms: merged,
+    currentRoomByWindow: byWin,
+    // список могил не должен расти бесконечно
+    deletedRooms: [...deleted].slice(-500),
+  });
 }
 
 function getRoom() {
   return state.rooms.find((r) => r.id === state.currentRoomId);
+}
+
+// Комнаты, которые реально попали в историю. Черновик (пустой чат без единого
+// сообщения) живёт только в памяти панели и в списке не показывается.
+function savedRooms() {
+  return state.rooms.filter((r) => !r.draft);
+}
+
+// Черновиков держим ровно один — текущий. Остальные (например, оставшиеся
+// от переключения вкладок) выбрасываем, чтобы не копить мусор.
+function dropStaleDrafts() {
+  state.rooms = state.rooms.filter(
+    (r) => !r.draft || r.id === state.currentRoomId,
+  );
 }
 
 function createRoom(render = true, tab = state.tab) {
@@ -104,6 +143,7 @@ function createRoom(render = true, tab = state.tab) {
     title: "Новый чат",
     createdAt: Date.now(),
     updatedAt: Date.now(),
+    draft: true, // в историю и storage попадёт только после первого сообщения
     items: [], // сырые items для Responses API
     view: [], // элементы для отрисовки
     // привязка к вкладке и к домену, с которого начался диалог
@@ -111,10 +151,12 @@ function createRoom(render = true, tab = state.tab) {
     tabHost: tab ? tab.host || "" : "",
     tabDomain: tab ? tab.domain || normDomain(tab.host) : "",
     tabTitle: tab ? tab.title || "" : "",
+    tabUrl: tab ? tab.url || "" : "", // конкретная страница, к которой привязан чат
     windowId: tab ? tab.windowId : state.windowId,
   };
   state.rooms.unshift(room);
   state.currentRoomId = room.id;
+  dropStaleDrafts();
   if (render) {
     renderRoom();
     persist();
@@ -159,7 +201,7 @@ function roomForTab(tab) {
   // в ЭТОМ окне, иначе панели разных окон воруют чаты друг у друга.
   const dom = tabDomain(tab);
   if (dom) {
-    const candidates = state.rooms
+    const candidates = savedRooms()
       .filter(
         (r) =>
           (r.tabDomain || normDomain(r.tabHost)) === dom &&
@@ -194,15 +236,18 @@ function applyTab(tab, { switchRoom = true } = {}) {
     room.tabHost = tab.host || room.tabHost;
     if (!room.tabDomain) room.tabDomain = tabDomain(tab);
     room.tabTitle = tab.title || room.tabTitle;
+    // запоминаем последнюю страницу чата, служебные адреса не пишем
+    if (tab.url && !tab.restricted) room.tabUrl = tab.url;
     room.windowId = tab.windowId;
   } else {
-    // для новой вкладки — новый чат, но пустую комнату переиспользуем
+    // для новой вкладки — новый черновик, но текущий пустой переиспользуем
     const cur = getRoom();
-    if (cur && !cur.items.length) {
+    if (cur && cur.draft && !cur.items.length) {
       cur.tabId = tab.id;
       cur.tabHost = tab.host || "";
       cur.tabDomain = tabDomain(tab);
       cur.tabTitle = tab.title || "";
+      cur.tabUrl = tab.restricted ? "" : tab.url || "";
       cur.windowId = tab.windowId;
       renderRoom();
     } else {
@@ -458,6 +503,16 @@ async function send(textOverride) {
 
   addUserMessage(text);
   room.items.push({ role: "user", content: [{ type: "input_text", text }] });
+
+  // первое сообщение — только теперь комната становится настоящей и попадает в историю
+  delete room.draft;
+
+  // фиксируем страницу, на которой шёл разговор — по ней вернёмся из истории
+  if (state.tab && state.tab.url && !state.tab.restricted) {
+    room.tabUrl = state.tab.url;
+    room.tabHost = state.tab.host || room.tabHost;
+    if (!room.tabDomain) room.tabDomain = tabDomain(state.tab);
+  }
 
   if (room.title === "Новый чат") {
     room.title = text.slice(0, 40) + (text.length > 40 ? "…" : "");
@@ -850,10 +905,11 @@ function fillDomainSelect(rooms) {
 function renderRoomsList() {
   const q = els.roomsSearch.value.trim().toLowerCase();
   const cur = tabDomain(state.tab);
+  const rooms = savedRooms(); // пустой черновик в историю не показываем
 
-  fillDomainSelect(state.rooms);
+  fillDomainSelect(rooms);
 
-  const list = state.rooms.filter((r) => {
+  const list = rooms.filter((r) => {
     if (q && !r.title.toLowerCase().includes(q)) return false;
     if (!state.roomsFilter) return true;
     return (roomDomain(r) || "(без сайта)") === state.roomsFilter;
@@ -898,6 +954,59 @@ function renderRoomsList() {
   }
 }
 
+// Переход на страницу, к которой привязан чат.
+// Если сохранённого URL нет — падаем на домен, иначе просто ничего не делаем.
+// Вкладка теперь принадлежит этой комнате: у остальных комнат такой же tabId
+// снимаем, иначе roomForTab() вернёт чужой чат и панель переключится обратно.
+function claimTab(room, tabId) {
+  if (tabId == null) return;
+  for (const o of state.rooms) {
+    if (o !== room && o.tabId === tabId) o.tabId = null;
+  }
+  room.tabId = tabId;
+}
+
+async function gotoRoomUrl(r) {
+  const url = r.tabUrl || (roomDomain(r) ? "https://" + roomDomain(r) : "");
+  if (!/^https?:\/\//i.test(url)) return;
+
+  // уже на этой странице — дёргать вкладку незачем, только закрепим её за чатом
+  if (state.tab && stripHash(state.tab.url) === stripHash(url)) {
+    claimTab(r, state.tab.id);
+    persist();
+    return;
+  }
+
+  // переход, скорее всего, произойдёт в текущей вкладке — забираем её заранее,
+  // чтобы событие tab_changed не увело нас в другой чат
+  if (state.tab) claimTab(r, state.tab.id);
+
+  try {
+    const resp = await chrome.runtime.sendMessage({
+      target: "background",
+      action: "focus_or_open_url",
+      url,
+      windowId: state.windowId,
+    });
+    if (resp && resp.ok && resp.tab) {
+      // привязываем чат к вкладке, в которой реально открылась страница
+      claimTab(r, resp.tab.id);
+      r.windowId = resp.tab.windowId;
+      r.tabHost = resp.tab.host || r.tabHost;
+      if (!r.tabDomain) r.tabDomain = resp.tab.domain || "";
+      if (resp.tab.url && !resp.tab.restricted) r.tabUrl = resp.tab.url;
+      state.tab = resp.tab;
+      renderTabTitle();
+      loadSitePrompt();
+    }
+  } catch (_) {}
+  persist();
+}
+
+function stripHash(u) {
+  return String(u || "").split("#")[0];
+}
+
 function roomItem(r) {
   const item = document.createElement("div");
   item.className =
@@ -914,15 +1023,23 @@ function roomItem(r) {
     persist();
     renderRoom();
     toggleRooms(false);
+    gotoRoomUrl(r);
   });
   item.querySelector(".room-item-del").addEventListener("click", (e) => {
     e.stopPropagation();
+    e.preventDefault();
+    // без могилы persist() вернёт комнату обратно при слиянии с storage
+    state.deleted.add(r.id);
     state.rooms = state.rooms.filter((x) => x.id !== r.id);
-    if (!state.rooms.length) createRoom(false);
-    if (state.currentRoomId === r.id) state.currentRoomId = state.rooms[0].id;
+    if (state.currentRoomId === r.id) {
+      const next = savedRooms()[0];
+      // сохранённых чатов не осталось — открываем чистый черновик
+      if (next) state.currentRoomId = next.id;
+      else createRoom(false, state.tab);
+      renderRoom();
+    }
     persist();
     renderRoomsList();
-    renderRoom();
   });
   return item;
 }
@@ -1038,7 +1155,9 @@ els.stop.addEventListener("click", () => {
 });
 // Новая задача: чистый контекст, старый чат остаётся в истории этого домена
 els.btnNew.addEventListener("click", () => {
-  createRoom(true, state.tab);
+  const cur = getRoom();
+  // уже сидим в пустом черновике — второй такой же не нужен
+  if (!cur || !cur.draft || cur.items.length) createRoom(true, state.tab);
   toggleRooms(false);
   toggleSitePanel(false);
   renderRoomsList();
